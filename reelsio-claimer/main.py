@@ -204,7 +204,17 @@ async def main():
     convert_tdata_sessions(config["api_id"], config["api_hash"])
 
     sessions = get_session_files()
-    if not sessions:
+    if sessions:
+        logger.info(f"Found {len(sessions)} session(s): {[s.stem for s in sessions]}")
+        answer = input("Add more accounts before starting? (y/n): ").strip().lower()
+        if answer == "y":
+            while True:
+                await authorize_new_account(config["api_id"], config["api_hash"])
+                again = input("Add another account? (y/n): ").strip().lower()
+                if again != "y":
+                    break
+            sessions = get_session_files()
+    else:
         logger.info("No sessions found. Starting authorization mode.")
         while True:
             await authorize_new_account(config["api_id"], config["api_hash"])
@@ -212,9 +222,10 @@ async def main():
             if answer != "y":
                 break
         sessions = get_session_files()
-        if not sessions:
-            logger.error("No sessions created. Exiting.")
-            return
+
+    if not sessions:
+        logger.error("No sessions created. Exiting.")
+        return
 
     if sys.platform != "win32":
         loop = asyncio.get_event_loop()
