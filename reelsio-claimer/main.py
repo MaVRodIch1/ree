@@ -88,8 +88,10 @@ async def authorize_new_account(api_id: int, api_hash: str):
         logger.info(f"Session {session_name} already exists, skipping")
         return
     session_path = str(SESSIONS_DIR / session_name)
-    client = TelegramClient(session_path, int(api_id), str(api_hash))
-    client._api_hash = str(api_hash)
+    api_id = int(api_id)
+    api_hash = str(api_hash)
+    client = TelegramClient(session_path, api_id, api_hash)
+    logger.info(f"[debug] api_id type={type(client.api_id)} api_hash type={type(client.api_hash)}")
     try:
         await client.connect()
         if not await client.is_user_authorized():
@@ -121,7 +123,6 @@ async def validate_sessions(api_id: int, api_hash: str) -> list[Path]:
     for session_path in sessions:
         label = session_path.stem
         client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
-        client._api_hash = str(api_hash)
         try:
             await client.connect()
             if not await client.is_user_authorized():
