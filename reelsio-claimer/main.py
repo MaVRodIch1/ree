@@ -43,6 +43,7 @@ def convert_tdata_sessions(api_id: int, api_hash: str):
     try:
         from opentele.td import TDesktop
         from opentele.tl import TelegramClient as OpenteleClient
+        from opentele.exception import OpenTeleException
     except ImportError:
         logger.warning("opentele not installed, skipping tdata conversion")
         return
@@ -56,7 +57,7 @@ def convert_tdata_sessions(api_id: int, api_hash: str):
             continue
         try:
             tdesk = TDesktop(str(entry))
-        except Exception as e:
+        except (Exception, OpenTeleException) as e:
             logger.warning(f"[tdata] Skipping {entry.name}: {e}")
             continue
         if not tdesk.isLoaded():
@@ -68,7 +69,7 @@ def convert_tdata_sessions(api_id: int, api_hash: str):
                 flag=OpenteleClient.Flag.UseCurrentSession,
             )
             logger.info(f"[tdata] Converted {entry.name} -> {session_name}.session")
-        except Exception as e:
+        except (Exception, OpenTeleException) as e:
             logger.error(f"[tdata] Error converting {entry.name}: {e}")
 
 
