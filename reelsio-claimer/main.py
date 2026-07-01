@@ -101,6 +101,37 @@ def get_session_files() -> list[Path]:
     return sorted(SESSIONS_DIR.glob("*.session"))
 
 
+async def validate_sessions(api_id: int, api_hash: str) -> list[Path]:
+    sessions = get_session_files()
+    if not sessions:
+        return []
+
+    valid = []
+    for session_path in sessions:
+        label = session_path.stem
+        client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash)
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                logger.warning(f"[{label}] Session expired / not authorized — removing")
+                await client.disconnect()
+                session_path.unlink(missing_ok=True)
+                continue
+            me = await client.get_me()
+            logger.info(f"[{label}] Valid — {me.first_name} (id={me.id})")
+            valid.append(session_path)
+        except Exception as e:
+            logger.warning(f"[{label}] Invalid session ({e}) — removing")
+            session_path.unlink(missing_ok=True)
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+    return valid
+
+
 async def claim_spins(client: TelegramClient, bot_username: str, account_label: str):
     account_logger = logging.getLogger(f"reelsio-claimer.{account_label}")
     account_logger.handlers = logger.handlers
@@ -226,6 +257,16 @@ async def main():
     if not sessions:
         logger.error("No sessions created. Exiting.")
         return
+
+    logger.info("Validating sessions...")
+    valid_sessions = await validate_sessions(config["api_id"], config["api_hash"])
+    invalid_count = len(sessions) - len(valid_sessions)
+    if invalid_count > 0:
+        logger.info(f"Removed {invalid_count} invalid session(s)")
+    if not valid_sessions:
+        logger.error("No valid sessions remaining. Exiting.")
+        return
+    logger.info(f"{len(valid_sessions)} valid session(s) ready")
 
     if sys.platform != "win32":
         loop = asyncio.get_event_loop()
