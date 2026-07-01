@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import signal
+import subprocess
 import sys
 from glob import glob
 from pathlib import Path
@@ -42,7 +43,7 @@ def load_config() -> dict:
     return cfg
 
 
-def convert_tdata_sessions(api_id: int, api_hash: str):
+def convert_tdata_sessions():
     dirs_to_convert = [
         entry for entry in sorted(TDATA_DIR.iterdir())
         if entry.is_dir() and not (SESSIONS_DIR / f"{entry.name}.session").exists()
@@ -50,32 +51,19 @@ def convert_tdata_sessions(api_id: int, api_hash: str):
     if not dirs_to_convert:
         return
 
-    try:
-        from opentele.td import TDesktop
-        from opentele.tl import TelegramClient as OpenteleClient
-        from opentele.exception import OpenTeleException
-    except ImportError:
-        logger.warning("opentele not installed, skipping tdata conversion")
-        return
-
-    for entry in dirs_to_convert:
-        session_name = entry.name
-        try:
-            tdesk = TDesktop(str(entry))
-        except (Exception, OpenTeleException) as e:
-            logger.warning(f"[tdata] Skipping {entry.name}: {e}")
-            continue
-        if not tdesk.isLoaded():
-            logger.warning(f"[tdata] Failed to load tdata from {entry.name}")
-            continue
-        try:
-            client = tdesk.ToTelethon(
-                str(SESSIONS_DIR / session_name),
-                flag=OpenteleClient.Flag.UseCurrentSession,
-            )
-            logger.info(f"[tdata] Converted {entry.name} -> {session_name}.session")
-        except (Exception, OpenTeleException) as e:
-            logger.error(f"[tdata] Error converting {entry.name}: {e}")
+    # Run in a subprocess: opentele monkeypatches telethon.TelegramClient
+    # globally and irreversibly on import, which corrupts api_id/api_hash
+    # handling for every TelegramClient created afterward in this process.
+    script = BASE_DIR / "tdata_convert.py"
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        logger.info(line)
+    for line in result.stderr.splitlines():
+        logger.error(line)
 
 
 async def authorize_new_account(api_id: int, api_hash: str):
@@ -91,7 +79,6 @@ async def authorize_new_account(api_id: int, api_hash: str):
     api_id = int(api_id)
     api_hash = str(api_hash)
     client = TelegramClient(session_path, api_id, api_hash)
-    logger.info(f"[debug] api_id type={type(client.api_id)} api_hash type={type(client.api_hash)}")
     try:
         await client.connect()
         if not await client.is_user_authorized():
@@ -245,7 +232,7 @@ async def run_cycle(config: dict):
 async def main():
     config = load_config()
 
-    convert_tdata_sessions(config["api_id"], config["api_hash"])
+    convert_tdata_sessions()
 
     sessions = get_session_files()
     if sessions:
