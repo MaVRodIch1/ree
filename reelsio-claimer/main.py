@@ -216,9 +216,10 @@ async def main():
             logger.error("No sessions created. Exiting.")
             return
 
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: shutdown_event.set())
+    if sys.platform != "win32":
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, lambda: shutdown_event.set())
 
     interval_hours = config.get("interval_hours", 6)
     random_delay_minutes = config.get("random_delay_minutes", 30)
