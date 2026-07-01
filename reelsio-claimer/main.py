@@ -1,16 +1,15 @@
 import asyncio
 import json
 import logging
-import os
 import random
-import re
 import signal
 import subprocess
 import sys
-from glob import glob
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
-from telethon import TelegramClient, errors
+import aiohttp
+from telethon import TelegramClient, errors, functions, types
 
 BASE_DIR = Path(__file__).resolve().parent
 SESSIONS_DIR = BASE_DIR / "sessions"
@@ -34,6 +33,8 @@ _fh.setFormatter(_fmt)
 logger.addHandler(_fh)
 
 shutdown_event = asyncio.Event()
+
+ZONTIQ_BASE = "https://api.zontiq.io/api/v1"
 
 
 def load_config() -> dict:
@@ -133,6 +134,49 @@ async def validate_sessions(api_id: int, api_hash: str) -> list[Path]:
     return valid
 
 
+async def get_webapp_init_data(client: TelegramClient, bot_username: str) -> str:
+    bot = await client.get_entity(bot_username)
+    full = await client(functions.users.GetFullUserRequest(bot))
+    menu_button = full.full_user.bot_info.menu_button if full.full_user.bot_info else None
+
+    if not isinstance(menu_button, types.BotMenuButton):
+        raise RuntimeError("Bot has no menu button web app configured")
+
+    result = await client(functions.messages.RequestSimpleWebViewRequest(
+        bot=bot,
+        platform="android",
+        url=menu_button.url,
+        from_side_menu=True,
+    ))
+
+    params = parse_qs(urlparse(result.url).fragment)
+    init_data = params.get("tgWebAppData", [None])[0]
+    if not init_data:
+        raise RuntimeError("tgWebAppData not found in webview URL")
+    return init_data
+
+
+async def fetch_spin_state(init_data: str) -> dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{ZONTIQ_BASE}/miniapp/auth",
+            json={"initData": init_data},
+            timeout=aiohttp.ClientTimeout(total=20),
+        ) as resp:
+            resp.raise_for_status()
+            auth_data = await resp.json()
+
+        token = auth_data["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        async with session.get(
+            f"{ZONTIQ_BASE}/roulette/state",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=20),
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.json()
+
+
 async def claim_spins(client: TelegramClient, bot_username: str, account_label: str):
     account_logger = logging.getLogger(f"reelsio-claimer.{account_label}")
     account_logger.handlers = logger.handlers
@@ -140,20 +184,11 @@ async def claim_spins(client: TelegramClient, bot_username: str, account_label: 
     account_logger.setLevel(logging.INFO)
 
     try:
-        await client.send_message(bot_username, "/start")
-        await asyncio.sleep(random.uniform(2, 5))
-
-        messages = await client.get_messages(bot_username, limit=1)
-        if messages and messages[0].message:
-            text = messages[0].message
-            spin_match = re.search(r"(\d+)\s*(?:спин|spin)", text, re.IGNORECASE)
-            if spin_match:
-                account_logger.info(f"Claim result: {spin_match.group(0)} (full: {text})")
-            else:
-                account_logger.info(f"Claim result: {text}")
-        else:
-            account_logger.warning("No response from bot after /start")
-
+        init_data = await get_webapp_init_data(client, bot_username)
+        state = await fetch_spin_state(init_data)
+        free_spins = state.get("freeSpinsAvailable")
+        max_spins = state.get("maxSpins")
+        account_logger.info(f"Claim result: {free_spins}/{max_spins} free spins available")
     except errors.FloodWaitError as e:
         account_logger.warning(f"FloodWait: sleeping {e.seconds}s")
         await asyncio.sleep(e.seconds)
