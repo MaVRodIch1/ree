@@ -81,20 +81,28 @@ async def authorize_new_account(api_id: int, api_hash: str):
     if not phone:
         return
     session_name = phone.replace("+", "").replace(" ", "")
+    session_file = SESSIONS_DIR / f"{session_name}.session"
+    if session_file.exists():
+        logger.info(f"Session {session_name} already exists, skipping")
+        return
     session_path = str(SESSIONS_DIR / session_name)
-    client = TelegramClient(session_path, api_id, api_hash)
-    await client.connect()
-    if not await client.is_user_authorized():
-        await client.send_code_request(phone)
-        code = input("Enter the code you received: ").strip()
-        try:
-            await client.sign_in(phone, code)
-        except errors.SessionPasswordNeededError:
-            password = input("2FA password required. Enter password: ").strip()
-            await client.sign_in(password=password)
-    me = await client.get_me()
-    logger.info(f"Authorized as {me.first_name} ({me.id}), session saved to {session_name}.session")
-    await client.disconnect()
+    client = TelegramClient(session_path, int(api_id), str(api_hash))
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.send_code_request(phone)
+            code = input("Enter the code you received: ").strip()
+            try:
+                await client.sign_in(phone, code)
+            except errors.SessionPasswordNeededError:
+                password = input("2FA password required. Enter password: ").strip()
+                await client.sign_in(password=password)
+        me = await client.get_me()
+        logger.info(f"Authorized as {me.first_name} ({me.id}), session saved to {session_name}.session")
+    except Exception as e:
+        logger.error(f"Authorization failed: {e}")
+    finally:
+        await client.disconnect()
 
 
 def get_session_files() -> list[Path]:
@@ -109,7 +117,7 @@ async def validate_sessions(api_id: int, api_hash: str) -> list[Path]:
     valid = []
     for session_path in sessions:
         label = session_path.stem
-        client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash)
+        client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
         try:
             await client.connect()
             if not await client.is_user_authorized():
@@ -204,7 +212,7 @@ async def run_cycle(config: dict):
             break
 
         account_label = session_path.stem
-        client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash)
+        client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
 
         try:
             await client.connect()
