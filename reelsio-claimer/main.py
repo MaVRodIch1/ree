@@ -135,6 +135,7 @@ async def validate_sessions(api_id: int, api_hash: str) -> list[Path]:
 async def claim_spins(client: TelegramClient, bot_username: str, account_label: str):
     account_logger = logging.getLogger(f"reelsio-claimer.{account_label}")
     account_logger.handlers = logger.handlers
+    account_logger.propagate = False
     account_logger.setLevel(logging.INFO)
 
     try:
