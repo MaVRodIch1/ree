@@ -43,6 +43,13 @@ def load_config() -> dict:
 
 
 def convert_tdata_sessions(api_id: int, api_hash: str):
+    dirs_to_convert = [
+        entry for entry in sorted(TDATA_DIR.iterdir())
+        if entry.is_dir() and not (SESSIONS_DIR / f"{entry.name}.session").exists()
+    ]
+    if not dirs_to_convert:
+        return
+
     try:
         from opentele.td import TDesktop
         from opentele.tl import TelegramClient as OpenteleClient
@@ -51,13 +58,8 @@ def convert_tdata_sessions(api_id: int, api_hash: str):
         logger.warning("opentele not installed, skipping tdata conversion")
         return
 
-    for entry in sorted(TDATA_DIR.iterdir()):
-        if not entry.is_dir():
-            continue
+    for entry in dirs_to_convert:
         session_name = entry.name
-        session_path = SESSIONS_DIR / f"{session_name}.session"
-        if session_path.exists():
-            continue
         try:
             tdesk = TDesktop(str(entry))
         except (Exception, OpenTeleException) as e:
@@ -87,6 +89,7 @@ async def authorize_new_account(api_id: int, api_hash: str):
         return
     session_path = str(SESSIONS_DIR / session_name)
     client = TelegramClient(session_path, int(api_id), str(api_hash))
+    client._api_hash = str(api_hash)
     try:
         await client.connect()
         if not await client.is_user_authorized():
@@ -118,6 +121,7 @@ async def validate_sessions(api_id: int, api_hash: str) -> list[Path]:
     for session_path in sessions:
         label = session_path.stem
         client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
+        client._api_hash = str(api_hash)
         try:
             await client.connect()
             if not await client.is_user_authorized():
