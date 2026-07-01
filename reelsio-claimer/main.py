@@ -36,7 +36,10 @@ shutdown_event = asyncio.Event()
 
 def load_config() -> dict:
     with open(CONFIG_PATH, "r") as f:
-        return json.load(f)
+        cfg = json.load(f)
+    cfg["api_id"] = int(cfg["api_id"])
+    cfg["api_hash"] = str(cfg["api_hash"])
+    return cfg
 
 
 def convert_tdata_sessions(api_id: int, api_hash: str):
