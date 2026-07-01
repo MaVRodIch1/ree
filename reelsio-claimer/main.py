@@ -139,6 +139,12 @@ async def get_webapp_init_data(client: TelegramClient, bot_username: str) -> str
     full = await client(functions.users.GetFullUserRequest(bot))
     menu_button = full.full_user.bot_info.menu_button if full.full_user.bot_info else None
 
+    logger.info(
+        f"[debug] bot id={getattr(bot, 'id', None)} is_bot={getattr(bot, 'bot', None)} "
+        f"menu_button_type={type(menu_button).__name__} "
+        f"menu_button_url={getattr(menu_button, 'url', None)}"
+    )
+
     if not isinstance(menu_button, types.BotMenuButton):
         raise RuntimeError("Bot has no menu button web app configured")
 
