@@ -258,7 +258,11 @@ async def main():
     convert_tdata_sessions()
 
     sessions = get_session_files()
-    if sessions:
+    interactive = sys.stdin.isatty()
+
+    if not interactive:
+        logger.info("No TTY detected (running under systemd/cron) — skipping interactive prompts")
+    elif sessions:
         logger.info(f"Found {len(sessions)} session(s): {[s.stem for s in sessions]}")
         answer = input("Add more accounts before starting? (y/n): ").strip().lower()
         if answer == "y":
