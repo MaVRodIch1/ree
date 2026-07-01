@@ -139,20 +139,26 @@ async def get_webapp_init_data(client: TelegramClient, bot_username: str) -> str
     full = await client(functions.users.GetFullUserRequest(bot))
     menu_button = full.full_user.bot_info.menu_button if full.full_user.bot_info else None
 
-    logger.info(
-        f"[debug] bot id={getattr(bot, 'id', None)} is_bot={getattr(bot, 'bot', None)} "
-        f"menu_button_type={type(menu_button).__name__} "
-        f"menu_button_url={getattr(menu_button, 'url', None)}"
-    )
-
     if not isinstance(menu_button, types.BotMenuButton):
         raise RuntimeError("Bot has no menu button web app configured")
 
-    result = await client(functions.messages.RequestSimpleWebViewRequest(
-        bot=bot,
+    # menu_button.url is a direct-link mini app: t.me/<bot>/<short_name>?startapp=<param>
+    parsed_menu_url = urlparse(menu_button.url)
+    path_parts = [p for p in parsed_menu_url.path.split("/") if p]
+    if len(path_parts) < 2:
+        raise RuntimeError(f"Unexpected menu button URL format: {menu_button.url}")
+    app_bot_username, app_short_name = path_parts[0], path_parts[1]
+    start_param = parse_qs(parsed_menu_url.query).get("startapp", [None])[0]
+
+    app_bot = await client.get_entity(app_bot_username)
+    input_bot_user = types.InputUser(user_id=app_bot.id, access_hash=app_bot.access_hash)
+
+    result = await client(functions.messages.RequestAppWebViewRequest(
+        peer=app_bot,
+        app=types.InputBotAppShortName(bot_id=input_bot_user, short_name=app_short_name),
         platform="android",
-        url=menu_button.url,
-        from_side_menu=True,
+        start_param=start_param,
+        write_allowed=True,
     ))
 
     params = parse_qs(urlparse(result.url).fragment)
