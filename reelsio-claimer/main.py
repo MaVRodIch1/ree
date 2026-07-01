@@ -56,9 +56,13 @@ def convert_tdata_sessions(api_id: int, api_hash: str):
             continue
         try:
             tdesk = TDesktop(str(entry))
-            if not tdesk.isLoaded():
-                logger.warning(f"[tdata] Failed to load tdata from {entry.name}")
-                continue
+        except Exception as e:
+            logger.warning(f"[tdata] Skipping {entry.name}: {e}")
+            continue
+        if not tdesk.isLoaded():
+            logger.warning(f"[tdata] Failed to load tdata from {entry.name}")
+            continue
+        try:
             client = tdesk.ToTelethon(
                 str(SESSIONS_DIR / session_name),
                 flag=OpenteleClient.Flag.UseCurrentSession,
