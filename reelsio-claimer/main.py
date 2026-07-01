@@ -201,6 +201,7 @@ async def claim_spins(client: TelegramClient, bot_username: str, account_label: 
         free_spins = state.get("freeSpinsAvailable")
         max_spins = state.get("maxSpins")
         account_logger.info(f"Claim result: {free_spins}/{max_spins} free spins available")
+        account_logger.info(f"[state dump] {json.dumps(state, ensure_ascii=False)}")
     except errors.FloodWaitError as e:
         account_logger.warning(f"FloodWait: sleeping {e.seconds}s")
         await asyncio.sleep(e.seconds)
