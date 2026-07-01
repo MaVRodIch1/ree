@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -142,42 +143,16 @@ async def claim_spins(client: TelegramClient, bot_username: str, account_label: 
         await client.send_message(bot_username, "/start")
         await asyncio.sleep(random.uniform(2, 5))
 
-        messages = await client.get_messages(bot_username, limit=5)
-
-        clicked = False
-        for msg in messages:
-            if msg.buttons:
-                for row in msg.buttons:
-                    for button in row:
-                        btn_text = button.text.lower() if button.text else ""
-                        if any(kw in btn_text for kw in [
-                            "spin", "спин", "claim", "клейм", "забрать",
-                            "получить", "бонус", "bonus", "крутить",
-                        ]):
-                            account_logger.info(f"Clicking button: '{button.text}'")
-                            result = await button.click()
-                            if result and hasattr(result, "message") and result.message:
-                                account_logger.info(f"Claim result: {result.message}")
-                            else:
-                                await asyncio.sleep(2)
-                                new_msgs = await client.get_messages(bot_username, limit=1)
-                                if new_msgs:
-                                    account_logger.info(f"Claim result: {new_msgs[0].message}")
-                            clicked = True
-                            break
-                    if clicked:
-                        break
-            if clicked:
-                break
-
-        if not clicked:
-            all_buttons = []
-            for msg in messages:
-                if msg.buttons:
-                    for row in msg.buttons:
-                        for button in row:
-                            all_buttons.append(button.text)
-            account_logger.warning(f"Spin button not found. Available buttons: {all_buttons}")
+        messages = await client.get_messages(bot_username, limit=1)
+        if messages and messages[0].message:
+            text = messages[0].message
+            spin_match = re.search(r"(\d+)\s*(?:спин|spin)", text, re.IGNORECASE)
+            if spin_match:
+                account_logger.info(f"Claim result: {spin_match.group(0)} (full: {text})")
+            else:
+                account_logger.info(f"Claim result: {text}")
+        else:
+            account_logger.warning("No response from bot after /start")
 
     except errors.FloodWaitError as e:
         account_logger.warning(f"FloodWait: sleeping {e.seconds}s")
