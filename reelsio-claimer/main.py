@@ -334,15 +334,20 @@ async def main():
     logger.info(f"{len(valid_sessions)} valid session(s) ready")
 
     # Choose mode: "farm" just reports free spins, "spin" spends them
-    # on the wheel. Interactive prompt when there's a TTY, otherwise
-    # fall back to config["mode"] (default "farm").
-    mode = str(config.get("mode", "farm")).lower()
-    if interactive:
+    # on the wheel. Priority: command-line arg > interactive prompt >
+    # config["mode"] (default "farm"). The CLI arg works everywhere,
+    # including PyCharm's run console where stdin is not a real TTY.
+    cli_mode = next((a.lower() for a in sys.argv[1:] if a.lower() in ("farm", "spin")), None)
+    if cli_mode:
+        mode = cli_mode
+    elif interactive:
         print("\nWhat should the script do each cycle?")
         print("  1) farm  — only check and report available free spins")
         print("  2) spin  — spend all available free spins on the wheel")
         choice = input("Choose (1/2) [1]: ").strip()
         mode = "spin" if choice == "2" else "farm"
+    else:
+        mode = str(config.get("mode", "farm")).lower()
     logger.info(f"Mode: {mode}")
 
     if sys.platform != "win32":
