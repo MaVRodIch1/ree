@@ -103,37 +103,6 @@ def get_session_files() -> list[Path]:
     return sorted(SESSIONS_DIR.glob("*.session"))
 
 
-async def validate_sessions(api_id: int, api_hash: str) -> list[Path]:
-    sessions = get_session_files()
-    if not sessions:
-        return []
-
-    valid = []
-    for session_path in sessions:
-        label = session_path.stem
-        client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
-        try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                logger.warning(f"[{label}] Session expired / not authorized — removing")
-                await client.disconnect()
-                session_path.unlink(missing_ok=True)
-                continue
-            me = await client.get_me()
-            logger.info(f"[{label}] Valid — {me.first_name} (id={me.id})")
-            valid.append(session_path)
-        except Exception as e:
-            logger.warning(f"[{label}] Invalid session ({e}) — removing")
-            session_path.unlink(missing_ok=True)
-        finally:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-
-    return valid
-
-
 async def get_webapp_init_data(client: TelegramClient, bot_username: str) -> str:
     bot = await client.get_entity(bot_username)
     full = await client(functions.users.GetFullUserRequest(bot))
@@ -189,16 +158,17 @@ async def get_state(session: aiohttp.ClientSession, token: str) -> dict:
 
 
 async def spin_wheel(session: aiohttp.ClientSession, token: str) -> dict:
-    # Endpoint is a best guess by REST convention; confirm the real
-    # request by capturing "Крути и выигрывай" in DevTools if it 404s.
+    # POST /roulette/start with an empty body spins the wheel once.
     async with session.post(
-        f"{ZONTIQ_BASE}/roulette/spin",
+        f"{ZONTIQ_BASE}/roulette/start",
         headers={"Authorization": f"Bearer {token}"},
-        json={},
         timeout=aiohttp.ClientTimeout(total=20),
     ) as resp:
         resp.raise_for_status()
-        return await resp.json()
+        try:
+            return await resp.json()
+        except Exception:
+            return {}
 
 
 async def process_account(client, bot_username, account_label, mode):
@@ -224,21 +194,26 @@ async def process_account(client, bot_username, account_label, mode):
                 return
 
             spun = 0
-            while free_spins > 0 and not shutdown_event.is_set():
+            max_attempts = free_spins + 3  # safety cap against runaway loops
+            while free_spins > 0 and spun < max_attempts and not shutdown_event.is_set():
                 result = await spin_wheel(session, token)
                 spun += 1
                 account_logger.info(
                     f"Spin #{spun}: {json.dumps(result, ensure_ascii=False)}"
                 )
-                # Trust the count returned by the spin response; fall back
-                # to decrementing locally if the field isn't present.
-                if isinstance(result, dict) and "freeSpinsAvailable" in result:
-                    free_spins = result.get("freeSpinsAvailable") or 0
-                else:
-                    free_spins -= 1
                 await asyncio.sleep(random.uniform(1.5, 4))
 
-            account_logger.info(f"Finished spinning: {spun} spin(s) used")
+                # Re-read authoritative state to know how many spins remain.
+                new_state = await get_state(session, token)
+                new_free = new_state.get("freeSpinsAvailable") or 0
+                if new_free >= free_spins:
+                    account_logger.warning(
+                        f"Free spins did not decrease ({free_spins} -> {new_free}), stopping"
+                    )
+                    break
+                free_spins = new_free
+
+            account_logger.info(f"Finished spinning: {spun} spin(s) used, {free_spins} left")
     except errors.FloodWaitError as e:
         account_logger.warning(f"FloodWait: sleeping {e.seconds}s")
         await asyncio.sleep(e.seconds)
@@ -323,15 +298,7 @@ async def main():
         logger.error("No sessions created. Exiting.")
         return
 
-    logger.info("Validating sessions...")
-    valid_sessions = await validate_sessions(config["api_id"], config["api_hash"])
-    invalid_count = len(sessions) - len(valid_sessions)
-    if invalid_count > 0:
-        logger.info(f"Removed {invalid_count} invalid session(s)")
-    if not valid_sessions:
-        logger.error("No valid sessions remaining. Exiting.")
-        return
-    logger.info(f"{len(valid_sessions)} valid session(s) ready")
+    logger.info(f"{len(sessions)} session(s) ready (dead ones are skipped per cycle)")
 
     # Choose mode: "farm" just reports free spins, "spin" spends them
     # on the wheel. Priority: command-line arg > interactive prompt >
