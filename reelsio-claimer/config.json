@@ -2,6 +2,7 @@
   "api_id": 12345,
   "api_hash": "abc123",
   "bot_username": "reelsio_ru",
+  "mode": "farm",
   "interval_hours": 6,
   "random_delay_minutes": 30,
   "delay_between_accounts_sec": [5, 30]

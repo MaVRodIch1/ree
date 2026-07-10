@@ -168,28 +168,40 @@ async def get_webapp_init_data(client: TelegramClient, bot_username: str) -> str
     return init_data
 
 
-async def fetch_spin_state(init_data: str) -> dict:
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            f"{ZONTIQ_BASE}/miniapp/auth",
-            json={"initData": init_data},
-            timeout=aiohttp.ClientTimeout(total=20),
-        ) as resp:
-            resp.raise_for_status()
-            auth_data = await resp.json()
-
-        token = auth_data["token"]
-        headers = {"Authorization": f"Bearer {token}"}
-        async with session.get(
-            f"{ZONTIQ_BASE}/roulette/state",
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=20),
-        ) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+async def authenticate(session: aiohttp.ClientSession, init_data: str) -> str:
+    async with session.post(
+        f"{ZONTIQ_BASE}/miniapp/auth",
+        json={"initData": init_data},
+        timeout=aiohttp.ClientTimeout(total=20),
+    ) as resp:
+        resp.raise_for_status()
+        return (await resp.json())["token"]
 
 
-async def claim_spins(client: TelegramClient, bot_username: str, account_label: str):
+async def get_state(session: aiohttp.ClientSession, token: str) -> dict:
+    async with session.get(
+        f"{ZONTIQ_BASE}/roulette/state",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=aiohttp.ClientTimeout(total=20),
+    ) as resp:
+        resp.raise_for_status()
+        return await resp.json()
+
+
+async def spin_wheel(session: aiohttp.ClientSession, token: str) -> dict:
+    # Endpoint is a best guess by REST convention; confirm the real
+    # request by capturing "Крути и выигрывай" in DevTools if it 404s.
+    async with session.post(
+        f"{ZONTIQ_BASE}/roulette/spin",
+        headers={"Authorization": f"Bearer {token}"},
+        json={},
+        timeout=aiohttp.ClientTimeout(total=20),
+    ) as resp:
+        resp.raise_for_status()
+        return await resp.json()
+
+
+async def process_account(client, bot_username, account_label, mode):
     account_logger = logging.getLogger(f"reelsio-claimer.{account_label}")
     account_logger.handlers = logger.handlers
     account_logger.propagate = False
@@ -197,20 +209,45 @@ async def claim_spins(client: TelegramClient, bot_username: str, account_label: 
 
     try:
         init_data = await get_webapp_init_data(client, bot_username)
-        state = await fetch_spin_state(init_data)
-        free_spins = state.get("freeSpinsAvailable")
-        max_spins = state.get("maxSpins")
-        account_logger.info(f"Claim result: {free_spins}/{max_spins} free spins available")
-        account_logger.info(f"[state dump] {json.dumps(state, ensure_ascii=False)}")
+        async with aiohttp.ClientSession() as session:
+            token = await authenticate(session, init_data)
+            state = await get_state(session, token)
+            free_spins = state.get("freeSpinsAvailable") or 0
+            max_spins = state.get("maxSpins")
+            account_logger.info(f"State: {free_spins}/{max_spins} free spins available")
+
+            if mode != "spin":
+                return
+
+            if free_spins <= 0:
+                account_logger.info("No free spins to use, skipping")
+                return
+
+            spun = 0
+            while free_spins > 0 and not shutdown_event.is_set():
+                result = await spin_wheel(session, token)
+                spun += 1
+                account_logger.info(
+                    f"Spin #{spun}: {json.dumps(result, ensure_ascii=False)}"
+                )
+                # Trust the count returned by the spin response; fall back
+                # to decrementing locally if the field isn't present.
+                if isinstance(result, dict) and "freeSpinsAvailable" in result:
+                    free_spins = result.get("freeSpinsAvailable") or 0
+                else:
+                    free_spins -= 1
+                await asyncio.sleep(random.uniform(1.5, 4))
+
+            account_logger.info(f"Finished spinning: {spun} spin(s) used")
     except errors.FloodWaitError as e:
         account_logger.warning(f"FloodWait: sleeping {e.seconds}s")
         await asyncio.sleep(e.seconds)
-        await claim_spins(client, bot_username, account_label)
+        await process_account(client, bot_username, account_label, mode)
     except Exception as e:
-        account_logger.error(f"Error during claim: {e}")
+        account_logger.error(f"Error: {e}")
 
 
-async def run_cycle(config: dict):
+async def run_cycle(config: dict, mode: str):
     api_id = config["api_id"]
     api_hash = config["api_hash"]
     bot_username = config["bot_username"]
@@ -221,7 +258,7 @@ async def run_cycle(config: dict):
         logger.warning("No session files found in sessions/")
         return
 
-    logger.info(f"Starting claim cycle for {len(sessions)} account(s)")
+    logger.info(f"Starting '{mode}' cycle for {len(sessions)} account(s)")
 
     for session_path in sessions:
         if shutdown_event.is_set():
@@ -236,7 +273,7 @@ async def run_cycle(config: dict):
                 logger.warning(f"[{account_label}] Not authorized, skipping")
                 continue
 
-            await claim_spins(client, bot_username, account_label)
+            await process_account(client, bot_username, account_label, mode)
         except Exception as e:
             logger.error(f"[{account_label}] Connection error: {e}")
         finally:
@@ -296,6 +333,18 @@ async def main():
         return
     logger.info(f"{len(valid_sessions)} valid session(s) ready")
 
+    # Choose mode: "farm" just reports free spins, "spin" spends them
+    # on the wheel. Interactive prompt when there's a TTY, otherwise
+    # fall back to config["mode"] (default "farm").
+    mode = str(config.get("mode", "farm")).lower()
+    if interactive:
+        print("\nWhat should the script do each cycle?")
+        print("  1) farm  — only check and report available free spins")
+        print("  2) spin  — spend all available free spins on the wheel")
+        choice = input("Choose (1/2) [1]: ").strip()
+        mode = "spin" if choice == "2" else "farm"
+    logger.info(f"Mode: {mode}")
+
     if sys.platform != "win32":
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -305,7 +354,7 @@ async def main():
     random_delay_minutes = config.get("random_delay_minutes", 30)
 
     while not shutdown_event.is_set():
-        await run_cycle(config)
+        await run_cycle(config, mode)
 
         if shutdown_event.is_set():
             break
