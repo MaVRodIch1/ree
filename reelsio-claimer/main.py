@@ -194,24 +194,23 @@ async def process_account(client, bot_username, account_label, mode):
                 return
 
             spun = 0
-            max_attempts = free_spins + 3  # safety cap against runaway loops
-            while free_spins > 0 and spun < max_attempts and not shutdown_event.is_set():
+            SAFETY_CAP = 1000  # absolute guard against a genuine infinite loop
+            while free_spins > 0 and spun < SAFETY_CAP and not shutdown_event.is_set():
                 result = await spin_wheel(session, token)
                 spun += 1
+                sector = result.get("sectorType") if isinstance(result, dict) else None
+                won = result.get("result") if isinstance(result, dict) else None
+                # The spin response already carries the updated count; a
+                # FreeSpin sector legitimately raises it, so we just keep
+                # spinning until it truly reaches zero.
+                if isinstance(result, dict) and "freeSpinsAvailable" in result:
+                    free_spins = result.get("freeSpinsAvailable") or 0
+                else:
+                    free_spins -= 1
                 account_logger.info(
-                    f"Spin #{spun}: {json.dumps(result, ensure_ascii=False)}"
+                    f"Spin #{spun}: {sector} -> {won} | {free_spins} spins left"
                 )
                 await asyncio.sleep(random.uniform(1.5, 4))
-
-                # Re-read authoritative state to know how many spins remain.
-                new_state = await get_state(session, token)
-                new_free = new_state.get("freeSpinsAvailable") or 0
-                if new_free >= free_spins:
-                    account_logger.warning(
-                        f"Free spins did not decrease ({free_spins} -> {new_free}), stopping"
-                    )
-                    break
-                free_spins = new_free
 
             account_logger.info(f"Finished spinning: {spun} spin(s) used, {free_spins} left")
     except errors.FloodWaitError as e:
