@@ -1,0 +1,16 @@
+# Telegram session files — keep these local, never commit
+sessions/*.session
+sessions/*.session-journal
+
+# tdata source folders
+tdata_accounts/*/
+
+# logs
+claims.log
+
+# python
+__pycache__/
+*.pyc
+venv/
+venv2/
+.venv/

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import signal
 import subprocess
@@ -264,13 +265,98 @@ async def run_cycle(config: dict, mode: str):
     logger.info("Claim cycle complete")
 
 
+# ── Terminal navigation menu ────────────────────────────────────────────────
+
+_C = {
+    "reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
+    "cyan": "\033[96m", "mag": "\033[95m", "yel": "\033[93m",
+    "grn": "\033[92m", "blu": "\033[94m",
+}
+
+
+def _enable_ansi():
+    # Turns on ANSI escape processing in legacy Windows consoles.
+    if sys.platform == "win32":
+        os.system("")
+
+
+def _print_banner():
+    c = _C
+    print(f"""{c['mag']}{c['bold']}
+╔════════════════════════════════════════════╗
+║            R E E L S   S O F T             ║
+║        мультиаккаунт • автоматизация        ║
+╚════════════════════════════════════════════╝{c['reset']}
+{c['dim']}Привет! Что будем делать сегодня?{c['reset']}""")
+
+
+def prompt_menu(title, options, back=True):
+    """options: list of (label, value). Accepts a number or a text match."""
+    c = _C
+    while True:
+        print(f"\n{c['cyan']}{c['bold']}{title}{c['reset']}")
+        for i, (label, _) in enumerate(options, 1):
+            print(f"  {c['yel']}{i}{c['reset']}) {label}")
+        if back:
+            print(f"  {c['dim']}0) назад{c['reset']}")
+        raw = input(f"{c['grn']}Выбор:{c['reset']} ").strip().lower()
+
+        if raw.isdigit():
+            n = int(raw)
+            if back and n == 0:
+                return None
+            if 1 <= n <= len(options):
+                return options[n - 1][1]
+        else:
+            for label, value in options:
+                if raw and (raw in label.lower() or raw == str(value).lower()):
+                    return value
+        print(f"{c['dim']}Не понял выбор, попробуй ещё раз.{c['reset']}")
+
+
+def choose_action():
+    """Walk the category tree; returns a selected action value (or None)."""
+    _enable_ansi()
+    _print_banner()
+    while True:
+        category = prompt_menu("Категории:", [
+            ("🤖 Фарм ботов", "farm_bots"),
+            ("💰 Пополняшки и прогрев", "topup_warm"),
+        ], back=False)
+
+        if category == "farm_bots":
+            sub = prompt_menu("Фарм ботов — выбери проект:", [
+                ("🎡 Рилс (Reels.io)", "reels"),
+            ])
+            if sub:
+                return sub
+        elif category == "topup_warm":
+            sub = prompt_menu("Пополняшки и прогрев:", [
+                ("✍️  Написать боту", "write_bot"),
+                ("⭐ Пополнить старс", "topup_stars"),
+            ])
+            if sub:
+                return sub
+
+
 async def main():
     config = load_config()
+    interactive = sys.stdin.isatty()
+    cli_mode = next((a.lower() for a in sys.argv[1:] if a.lower() in ("farm", "spin")), None)
+
+    # Show the navigation menu only in a real terminal without an explicit
+    # farm/spin CLI arg. Non-TTY (systemd) and arg runs go straight to Reels.
+    if interactive and not cli_mode:
+        action = choose_action()
+        if action is None:
+            return
+        if action != "reels":
+            print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
+            return
 
     convert_tdata_sessions()
 
     sessions = get_session_files()
-    interactive = sys.stdin.isatty()
 
     if not interactive:
         logger.info("No TTY detected (running under systemd/cron) — skipping interactive prompts")
@@ -299,19 +385,17 @@ async def main():
 
     logger.info(f"{len(sessions)} session(s) ready (dead ones are skipped per cycle)")
 
-    # Choose mode: "farm" just reports free spins, "spin" spends them
-    # on the wheel. Priority: command-line arg > interactive prompt >
-    # config["mode"] (default "farm"). The CLI arg works everywhere,
-    # including PyCharm's run console where stdin is not a real TTY.
-    cli_mode = next((a.lower() for a in sys.argv[1:] if a.lower() in ("farm", "spin")), None)
+    # Choose mode: "farm" just reports free spins, "spin" spends them on
+    # the wheel. Priority: command-line arg > interactive prompt >
+    # config["mode"] (default "farm"). cli_mode/interactive are computed
+    # at the top of main().
     if cli_mode:
         mode = cli_mode
     elif interactive:
-        print("\nWhat should the script do each cycle?")
-        print("  1) farm  — only check and report available free spins")
-        print("  2) spin  — spend all available free spins on the wheel")
-        choice = input("Choose (1/2) [1]: ").strip()
-        mode = "spin" if choice == "2" else "farm"
+        mode = prompt_menu("🎡 Рилс — что делаем?", [
+            ("Фарм — только собрать/показать фриспины", "farm"),
+            ("Спин — прокрутить все фриспины на колесе", "spin"),
+        ], back=False)
     else:
         mode = str(config.get("mode", "farm")).lower()
     logger.info(f"Mode: {mode}")
