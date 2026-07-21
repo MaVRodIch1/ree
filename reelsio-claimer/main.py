@@ -265,6 +265,76 @@ async def run_cycle(config: dict, mode: str):
     logger.info("Claim cycle complete")
 
 
+# ── Account securing: reset other sessions + change 2FA ──────────────────────
+
+async def secure_account(client, account_label, old_pw, new_pw, hint, do_reset, do_2fa):
+    account_logger = logging.getLogger(f"reelsio-claimer.{account_label}")
+    account_logger.handlers = logger.handlers
+    account_logger.propagate = False
+    account_logger.setLevel(logging.INFO)
+
+    if do_reset:
+        try:
+            await client(functions.auth.ResetAuthorizationsRequest())
+            account_logger.info("Other sessions terminated")
+        except Exception as e:
+            account_logger.error(f"Reset sessions failed: {e}")
+
+    if do_2fa:
+        try:
+            pwd = await client(functions.account.GetPasswordRequest())
+            if pwd.has_password:
+                await client.edit_2fa(
+                    current_password=old_pw or None, new_password=new_pw, hint=hint
+                )
+            else:
+                await client.edit_2fa(new_password=new_pw, hint=hint)
+            account_logger.info("2FA password updated")
+        except Exception as e:
+            account_logger.error(f"2FA change failed: {e}")
+
+
+async def secure_cycle(config, old_pw, new_pw, hint, do_reset, do_2fa):
+    api_id = config["api_id"]
+    api_hash = config["api_hash"]
+    delay_range = config.get("delay_between_accounts_sec", [5, 30])
+
+    sessions = get_session_files()
+    if not sessions:
+        logger.warning("No session files found in sessions/")
+        return
+
+    logger.info(f"Securing {len(sessions)} account(s)")
+
+    for session_path in sessions:
+        if shutdown_event.is_set():
+            break
+
+        account_label = session_path.stem
+        client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
+
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                logger.warning(f"[{account_label}] Not authorized, skipping")
+                continue
+            await secure_account(client, account_label, old_pw, new_pw, hint, do_reset, do_2fa)
+        except Exception as e:
+            logger.error(f"[{account_label}] Connection error: {e}")
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+        if not shutdown_event.is_set() and session_path != sessions[-1]:
+            delay = random.uniform(*delay_range)
+            logger.info(f"Waiting {delay:.1f}s before next account...")
+            await asyncio.sleep(delay)
+
+    logger.info("Securing complete")
+
+
 # ── Terminal navigation menu ────────────────────────────────────────────────
 
 _C = {
@@ -322,6 +392,7 @@ def choose_action():
         category = prompt_menu("Категории:", [
             ("🤖 Фарм ботов", "farm_bots"),
             ("💰 Пополняшки и прогрев", "topup_warm"),
+            ("🔐 Рега / безопасность аккаунтов", "secure_cat"),
         ], back=False)
 
         if category == "farm_bots":
@@ -337,6 +408,35 @@ def choose_action():
             ])
             if sub:
                 return sub
+        elif category == "secure_cat":
+            sub = prompt_menu("Безопасность аккаунтов:", [
+                ("🔐 Обезопасить (сброс сессий + смена 2FA)", "secure"),
+            ])
+            if sub:
+                return sub
+
+
+async def run_secure(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}🔐 Безопасность аккаунтов{c['reset']}")
+    print(f"{c['dim']}Сброс чужих сессий + смена облачного пароля 2FA "
+          f"для ВСЕХ сессий из sessions/{c['reset']}")
+
+    old_pw = input("Текущий 2FA пароль (Enter — если 2FA не стоит): ").strip()
+    new_pw = input("Новый 2FA пароль: ").strip()
+    if not new_pw:
+        print(f"{c['yel']}Новый пароль пустой — отмена.{c['reset']}")
+        return
+    hint = input("Подсказка к паролю (Enter — пропустить): ").strip()
+
+    count = len(get_session_files())
+    print(f"\n{c['yel']}Будет обработано {count} аккаунт(ов): сброшены чужие "
+          f"сессии и установлен новый 2FA.{c['reset']}")
+    if input("Продолжить? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
+        print(f"{c['dim']}Отменено.{c['reset']}")
+        return
+
+    await secure_cycle(config, old_pw, new_pw, hint, do_reset=True, do_2fa=True)
 
 
 async def main():
@@ -349,6 +449,9 @@ async def main():
     if interactive and not cli_mode:
         action = choose_action()
         if action is None:
+            return
+        if action == "secure":
+            await run_secure(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
