@@ -1,0 +1,10 @@
+# TON wallet for buying Stars via Fragment.
+# Copy this file to  wallet.txt  and put your 24-word seed phrase on the
+# first non-comment line (space-separated). wallet.txt is gitignored and
+# NEVER committed.
+#
+# SECURITY: use a DEDICATED hot wallet and keep only as much TON on it as
+# you plan to spend. Anyone with this seed controls the funds.
+#
+# Example (do NOT use these words):
+# abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual

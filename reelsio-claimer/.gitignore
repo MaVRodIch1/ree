@@ -20,6 +20,9 @@ avatars/_used/
 nicknames.txt
 names.txt
 
+# TON wallet seed phrase — NEVER commit
+wallet.txt
+
 # logs
 claims.log
 
