@@ -525,6 +525,10 @@ def load_names():
     return [ln.strip() for ln in NAMES_FILE.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
+def save_names(names):
+    NAMES_FILE.write_text("\n".join(names) + ("\n" if names else ""), encoding="utf-8")
+
+
 async def warm_account(client, account_label, set_avatar, set_name, set_username):
     account_logger = logging.getLogger(f"reelsio-claimer.{account_label}")
     account_logger.handlers = logger.handlers
@@ -553,13 +557,14 @@ async def warm_account(client, account_label, set_avatar, set_name, set_username
         if not names:
             account_logger.warning("names.txt is empty")
         else:
-            full = random.choice(names)
+            full = names[0]  # take first; consume on success so it's never reused
             first, _, last = full.partition(" ")
             try:
                 await client(functions.account.UpdateProfileRequest(
                     first_name=first, last_name=last
                 ))
                 account_logger.info(f"Name set: {full}")
+                save_names(names[1:])
             except Exception as e:
                 account_logger.error(f"Name failed: {e}")
 
@@ -836,6 +841,10 @@ async def run_warm(config):
           f"{'Ников: ' + str(len(load_nicks())) + '. ' if set_username else ''}{c['reset']}")
     if set_avatar and avatars_n < count:
         print(f"{c['dim']}Аватарок меньше, чем аккаунтов — на часть не хватит.{c['reset']}")
+    if set_name and len(load_names()) < count:
+        print(f"{c['dim']}Имён меньше, чем аккаунтов — на часть не хватит.{c['reset']}")
+    if set_username and len(load_nicks()) < count:
+        print(f"{c['dim']}Ников меньше, чем аккаунтов — на часть может не хватить.{c['reset']}")
     if input("Продолжить? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
         print(f"{c['dim']}Отменено.{c['reset']}")
         return
