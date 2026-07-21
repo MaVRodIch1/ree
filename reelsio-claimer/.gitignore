@@ -4,8 +4,10 @@ sessions/*.session-journal
 new_sessions/*.session
 new_sessions/*.session-journal
 
-# tdata source folders
+# tdata source folders and zip imports
 tdata_accounts/*/
+tdata_zips/*.zip
+tdata_zips/_extract_*/
 
 # logs
 claims.log

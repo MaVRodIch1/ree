@@ -4,9 +4,11 @@ import logging
 import os
 import random
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -17,12 +19,14 @@ BASE_DIR = Path(__file__).resolve().parent
 SESSIONS_DIR = BASE_DIR / "sessions"
 NEW_SESSIONS_DIR = BASE_DIR / "new_sessions"  # freshly bought accounts to secure
 TDATA_DIR = BASE_DIR / "tdata_accounts"
+TDATA_ZIPS_DIR = BASE_DIR / "tdata_zips"  # drop tdata .zip archives here to import
 CONFIG_PATH = BASE_DIR / "config.json"
 LOG_PATH = BASE_DIR / "claims.log"
 
 SESSIONS_DIR.mkdir(exist_ok=True)
 NEW_SESSIONS_DIR.mkdir(exist_ok=True)
 TDATA_DIR.mkdir(exist_ok=True)
+TDATA_ZIPS_DIR.mkdir(exist_ok=True)
 
 logger = logging.getLogger("reelsio-claimer")
 logger.setLevel(logging.INFO)
@@ -270,7 +274,7 @@ async def run_cycle(config: dict, mode: str):
 
 # ── Account securing: reset other sessions + change 2FA ──────────────────────
 
-async def secure_account(client, account_label, old_pw, new_pw, hint, do_reset, do_2fa):
+async def secure_account(client, account_label, old_pw, new_pw, hint, do_reset, do_2fa, keep_device=""):
     account_logger = logging.getLogger(f"reelsio-claimer.{account_label}")
     account_logger.handlers = logger.handlers
     account_logger.propagate = False
@@ -278,8 +282,26 @@ async def secure_account(client, account_label, old_pw, new_pw, hint, do_reset, 
 
     if do_reset:
         try:
-            await client(functions.auth.ResetAuthorizationsRequest())
-            account_logger.info("Other sessions terminated")
+            if keep_device:
+                # Terminate every session except the script's own (current)
+                # and any whose device/app name matches keep_device.
+                auths = await client(functions.account.GetAuthorizationsRequest())
+                keep = keep_device.lower()
+                killed = kept = 0
+                for a in auths.authorizations:
+                    dev = (a.device_model or "") + " " + (a.app_name or "")
+                    if a.current or keep in dev.lower():
+                        kept += 1
+                        continue
+                    try:
+                        await client(functions.account.ResetAuthorizationRequest(hash=a.hash))
+                        killed += 1
+                    except Exception as e:
+                        account_logger.warning(f"Could not terminate '{a.device_model}': {e}")
+                account_logger.info(f"Sessions: {killed} terminated, {kept} kept")
+            else:
+                await client(functions.auth.ResetAuthorizationsRequest())
+                account_logger.info("Other sessions terminated")
         except Exception as e:
             account_logger.error(f"Reset sessions failed: {e}")
 
@@ -297,7 +319,7 @@ async def secure_account(client, account_label, old_pw, new_pw, hint, do_reset, 
             account_logger.error(f"2FA change failed: {e}")
 
 
-async def secure_cycle(config, old_pw, new_pw, hint, do_reset, do_2fa):
+async def secure_cycle(config, old_pw, new_pw, hint, do_reset, do_2fa, keep_device=""):
     api_id = config["api_id"]
     api_hash = config["api_hash"]
     delay_range = config.get("delay_between_accounts_sec", [5, 30])
@@ -321,7 +343,7 @@ async def secure_cycle(config, old_pw, new_pw, hint, do_reset, do_2fa):
             if not await client.is_user_authorized():
                 logger.warning(f"[{account_label}] Not authorized, skipping")
                 continue
-            await secure_account(client, account_label, old_pw, new_pw, hint, do_reset, do_2fa)
+            await secure_account(client, account_label, old_pw, new_pw, hint, do_reset, do_2fa, keep_device)
         except Exception as e:
             logger.error(f"[{account_label}] Connection error: {e}")
         finally:
@@ -395,6 +417,73 @@ async def listen_login_code(config):
         await client.run_until_disconnected()
     finally:
         await client.disconnect()
+
+
+# ── tdata zip import → new_sessions/ ─────────────────────────────────────────
+
+def _find_tdata_dir(root: Path):
+    """Locate the actual tdata folder inside an extracted archive."""
+    if (root / "key_datas").exists():
+        return root
+    for p in root.rglob("tdata"):
+        if p.is_dir():
+            return p
+    # Fall back: some archives put the tdata contents directly at a top level.
+    for p in [root, *[d for d in root.iterdir() if d.is_dir()]]:
+        if (p / "key_datas").exists() or any(p.glob("D877F783D5D3EF8C*")):
+            return p
+    return None
+
+
+async def import_tdata_zips(config):
+    c = _C
+    zips = sorted(TDATA_ZIPS_DIR.glob("*.zip"))
+    print(f"\n{c['cyan']}{c['bold']}📦 Импорт tdata из zip → new_sessions/{c['reset']}")
+    if not zips:
+        print(f"{c['yel']}В папке tdata_zips/ нет .zip архивов. Кинь туда "
+              f"tdata-архивы и запусти снова.{c['reset']}")
+        return
+
+    print(f"{c['dim']}Найдено архивов: {len(zips)}{c['reset']}")
+    imported = 0
+    for zpath in zips:
+        name = zpath.stem
+        out_session = NEW_SESSIONS_DIR / name
+        if (NEW_SESSIONS_DIR / f"{name}.session").exists():
+            print(f"{c['dim']}{name}: .session уже существует, пропуск.{c['reset']}")
+            continue
+
+        tmp = TDATA_ZIPS_DIR / f"_extract_{name}"
+        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            with zipfile.ZipFile(zpath) as zf:
+                zf.extractall(tmp)
+        except Exception as e:
+            print(f"{c['yel']}{name}: не смог распаковать zip: {e}{c['reset']}")
+            shutil.rmtree(tmp, ignore_errors=True)
+            continue
+
+        tdata_dir = _find_tdata_dir(tmp)
+        if not tdata_dir:
+            print(f"{c['yel']}{name}: внутри zip не найдена папка tdata.{c['reset']}")
+            shutil.rmtree(tmp, ignore_errors=True)
+            continue
+
+        # opentele monkeypatches Telethon, so convert in a subprocess.
+        result = subprocess.run(
+            [sys.executable, str(BASE_DIR / "tdata_convert.py"), str(tdata_dir), str(out_session)],
+            capture_output=True, text=True,
+        )
+        for line in (result.stdout + result.stderr).splitlines():
+            if line.strip():
+                print(f"  {c['dim']}{line}{c['reset']}")
+
+        if (NEW_SESSIONS_DIR / f"{name}.session").exists():
+            imported += 1
+            print(f"{c['grn']}{name}: импортирован в new_sessions/{c['reset']}")
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print(f"\n{c['grn']}Готово: импортировано {imported} из {len(zips)}.{c['reset']}")
 
 
 # ── Terminal navigation menu ────────────────────────────────────────────────
@@ -512,6 +601,7 @@ def choose_action():
             sub = prompt_menu("Безопасность аккаунтов:", [
                 ("🔐 Обезопасить (сброс сессий + смена 2FA)", "secure"),
                 ("📲 Прослушка кода входа (зайти по сессии)", "listen_code"),
+                ("📦 Импорт tdata из zip → new_sessions/", "import_tdata"),
             ])
             if sub:
                 return sub
@@ -536,13 +626,18 @@ async def run_secure(config):
         return
     hint = input("Подсказка к паролю (Enter — пропустить): ").strip()
 
+    print(f"{c['dim']}Чтобы НЕ выкинуть своё устройство при сбросе сессий, укажи "
+          f"часть его названия (например 'Nitro' или 'Desktop').{c['reset']}")
+    keep_device = input("Не трогать устройство с названием (Enter — сбросить все чужие): ").strip()
+
     print(f"\n{c['yel']}Будет обработано {count} аккаунт(ов) из new_sessions/: "
-          f"сброшены чужие сессии и установлен новый 2FA.{c['reset']}")
+          f"сброшены чужие сессии{' (кроме «' + keep_device + '»)' if keep_device else ''} "
+          f"и установлен новый 2FA.{c['reset']}")
     if input("Продолжить? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
         print(f"{c['dim']}Отменено.{c['reset']}")
         return
 
-    await secure_cycle(config, old_pw, new_pw, hint, do_reset=True, do_2fa=True)
+    await secure_cycle(config, old_pw, new_pw, hint, do_reset=True, do_2fa=True, keep_device=keep_device)
 
 
 async def main():
@@ -561,6 +656,9 @@ async def main():
             return
         if action == "listen_code":
             await listen_login_code(config)
+            return
+        if action == "import_tdata":
+            await import_tdata_zips(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
