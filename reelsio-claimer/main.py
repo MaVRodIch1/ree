@@ -595,8 +595,16 @@ async def warm_account(client, account_label, set_avatar, set_name, set_username
         if not nicks:
             account_logger.warning("nicknames.txt is empty")
             return
-        consumed, done = [], False
+        # Telegram rate-limits username changes hard, and every occupied
+        # attempt still counts. So try only a few high-entropy candidates
+        # and bail on large FloodWaits instead of sleeping for ~an hour.
+        MAX_TRIES = 3
+        FLOOD_CAP = 120  # seconds; longer than this → give up for this run
+        consumed, done, tries = [], False, 0
         for name in nicks:
+            if tries >= MAX_TRIES:
+                break
+            tries += 1
             try:
                 await client(functions.account.UpdateUsernameRequest(username=name))
                 account_logger.info(f"Username set: @{name}")
@@ -604,7 +612,13 @@ async def warm_account(client, account_label, set_avatar, set_name, set_username
                 done = True
                 break
             except errors.FloodWaitError as e:
-                account_logger.warning(f"FloodWait {e.seconds}s on username")
+                if e.seconds > FLOOD_CAP:
+                    account_logger.warning(
+                        f"FloodWait {e.seconds}s too long — skip username for now "
+                        f"(keep @{name} in pool, try later)"
+                    )
+                    break  # do NOT consume this name; retry it next run
+                account_logger.warning(f"FloodWait {e.seconds}s, waiting")
                 await asyncio.sleep(e.seconds)
                 try:
                     await client(functions.account.UpdateUsernameRequest(username=name))
@@ -613,7 +627,7 @@ async def warm_account(client, account_label, set_avatar, set_name, set_username
                     done = True
                     break
                 except Exception as e2:
-                    account_logger.info(f"@{name} failed after wait ({type(e2).__name__}), next")
+                    account_logger.info(f"@{name} failed ({type(e2).__name__}), next")
                     consumed.append(name)
                     continue
             except Exception as e:
@@ -623,7 +637,7 @@ async def warm_account(client, account_label, set_avatar, set_name, set_username
                 continue
         save_nicks([n for n in nicks if n not in consumed])
         if not done:
-            account_logger.warning("Could not set any username from the list")
+            account_logger.warning("Could not set a username this run")
 
 
 async def warm_cycle(config, set_avatar, set_name, set_username):
