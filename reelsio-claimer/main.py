@@ -358,19 +358,9 @@ async def listen_login_code(config):
     c = _C
     api_id, api_hash = config["api_id"], config["api_hash"]
 
-    all_sessions = get_session_files(NEW_SESSIONS_DIR) + get_session_files(SESSIONS_DIR)
-    if not all_sessions:
-        print(f"{c['yel']}Нет сессий ни в new_sessions/, ни в sessions/.{c['reset']}")
+    session_path = pick_session("📲 Прослушка кода входа")
+    if session_path is None:
         return
-
-    print(f"\n{c['cyan']}{c['bold']}📲 Прослушка кода входа{c['reset']}")
-    for i, p in enumerate(all_sessions, 1):
-        print(f"  {c['yel']}{i}{c['reset']}) {p.stem}  {c['dim']}({p.parent.name}/){c['reset']}")
-    raw = input(f"{c['grn']}Выбери номер аккаунта:{c['reset']} ").strip()
-    if not raw.isdigit() or not (1 <= int(raw) <= len(all_sessions)):
-        print(f"{c['dim']}Неверный выбор.{c['reset']}")
-        return
-    session_path = all_sessions[int(raw) - 1]
 
     client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
     await client.connect()
@@ -454,6 +444,44 @@ def prompt_menu(title, options, back=True):
                 if raw and (raw in label.lower() or raw == str(value).lower()):
                     return value
         print(f"{c['dim']}Не понял выбор, попробуй ещё раз.{c['reset']}")
+
+
+def pick_session(title):
+    """Choose a .session file: pick folder, optional name search, then select."""
+    c = _C
+    folder = prompt_menu(f"{title} — из какой папки?", [
+        ("📁 new_sessions/ (новые)", "new"),
+        ("📁 sessions/ (рабочие)", "old"),
+        ("📁 обе папки", "both"),
+    ])
+    if folder is None:
+        return None
+
+    if folder == "new":
+        files = get_session_files(NEW_SESSIONS_DIR)
+    elif folder == "old":
+        files = get_session_files(SESSIONS_DIR)
+    else:
+        files = get_session_files(NEW_SESSIONS_DIR) + get_session_files(SESSIONS_DIR)
+
+    if not files:
+        print(f"{c['yel']}В выбранной папке нет сессий.{c['reset']}")
+        return None
+
+    query = input(f"{c['grn']}Поиск по имени/номеру (Enter — показать все):{c['reset']} ").strip().lower()
+    if query:
+        files = [f for f in files if query in f.stem.lower()]
+    if not files:
+        print(f"{c['yel']}Ничего не найдено по '{query}'.{c['reset']}")
+        return None
+
+    for i, p in enumerate(files, 1):
+        print(f"  {c['yel']}{i}{c['reset']}) {p.stem}  {c['dim']}({p.parent.name}/){c['reset']}")
+    raw = input(f"{c['grn']}Выбери номер:{c['reset']} ").strip()
+    if not raw.isdigit() or not (1 <= int(raw) <= len(files)):
+        print(f"{c['dim']}Неверный выбор.{c['reset']}")
+        return None
+    return files[int(raw) - 1]
 
 
 def choose_action():
