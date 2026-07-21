@@ -14,11 +14,13 @@ from telethon import TelegramClient, errors, functions, types
 
 BASE_DIR = Path(__file__).resolve().parent
 SESSIONS_DIR = BASE_DIR / "sessions"
+NEW_SESSIONS_DIR = BASE_DIR / "new_sessions"  # freshly bought accounts to secure
 TDATA_DIR = BASE_DIR / "tdata_accounts"
 CONFIG_PATH = BASE_DIR / "config.json"
 LOG_PATH = BASE_DIR / "claims.log"
 
 SESSIONS_DIR.mkdir(exist_ok=True)
+NEW_SESSIONS_DIR.mkdir(exist_ok=True)
 TDATA_DIR.mkdir(exist_ok=True)
 
 logger = logging.getLogger("reelsio-claimer")
@@ -100,8 +102,8 @@ async def authorize_new_account(api_id: int, api_hash: str):
         await client.disconnect()
 
 
-def get_session_files() -> list[Path]:
-    return sorted(SESSIONS_DIR.glob("*.session"))
+def get_session_files(directory: Path = SESSIONS_DIR) -> list[Path]:
+    return sorted(directory.glob("*.session"))
 
 
 async def get_webapp_init_data(client: TelegramClient, bot_username: str) -> str:
@@ -299,12 +301,12 @@ async def secure_cycle(config, old_pw, new_pw, hint, do_reset, do_2fa):
     api_hash = config["api_hash"]
     delay_range = config.get("delay_between_accounts_sec", [5, 30])
 
-    sessions = get_session_files()
+    sessions = get_session_files(NEW_SESSIONS_DIR)
     if not sessions:
-        logger.warning("No session files found in sessions/")
+        logger.warning("No session files found in new_sessions/")
         return
 
-    logger.info(f"Securing {len(sessions)} account(s)")
+    logger.info(f"Securing {len(sessions)} account(s) from new_sessions/")
 
     for session_path in sessions:
         if shutdown_event.is_set():
@@ -419,8 +421,14 @@ def choose_action():
 async def run_secure(config):
     c = _C
     print(f"\n{c['cyan']}{c['bold']}🔐 Безопасность аккаунтов{c['reset']}")
-    print(f"{c['dim']}Сброс чужих сессий + смена облачного пароля 2FA "
-          f"для ВСЕХ сессий из sessions/{c['reset']}")
+    print(f"{c['dim']}Работает только с папкой new_sessions/ — рабочие "
+          f"фарм-сессии в sessions/ не трогаются.{c['reset']}")
+
+    count = len(get_session_files(NEW_SESSIONS_DIR))
+    if count == 0:
+        print(f"{c['yel']}Папка new_sessions/ пуста — положи туда купленные "
+              f".session файлы и запусти снова.{c['reset']}")
+        return
 
     old_pw = input("Текущий 2FA пароль (Enter — если 2FA не стоит): ").strip()
     new_pw = input("Новый 2FA пароль: ").strip()
@@ -429,9 +437,8 @@ async def run_secure(config):
         return
     hint = input("Подсказка к паролю (Enter — пропустить): ").strip()
 
-    count = len(get_session_files())
-    print(f"\n{c['yel']}Будет обработано {count} аккаунт(ов): сброшены чужие "
-          f"сессии и установлен новый 2FA.{c['reset']}")
+    print(f"\n{c['yel']}Будет обработано {count} аккаунт(ов) из new_sessions/: "
+          f"сброшены чужие сессии и установлен новый 2FA.{c['reset']}")
     if input("Продолжить? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
         print(f"{c['dim']}Отменено.{c['reset']}")
         return

@@ -1,6 +1,8 @@
 # Telegram session files — keep these local, never commit
 sessions/*.session
 sessions/*.session-journal
+new_sessions/*.session
+new_sessions/*.session-journal
 
 # tdata source folders
 tdata_accounts/*/
