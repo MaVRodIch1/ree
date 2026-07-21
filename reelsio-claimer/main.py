@@ -20,6 +20,9 @@ SESSIONS_DIR = BASE_DIR / "sessions"
 NEW_SESSIONS_DIR = BASE_DIR / "new_sessions"  # freshly bought accounts to secure
 TDATA_DIR = BASE_DIR / "tdata_accounts"
 TDATA_ZIPS_DIR = BASE_DIR / "tdata_zips"  # drop tdata .zip archives here to import
+AVATARS_DIR = BASE_DIR / "avatars"  # profile photos for warming
+AVATARS_USED_DIR = AVATARS_DIR / "_used"  # used photos moved here, never reused
+NICKS_FILE = BASE_DIR / "nicknames.txt"  # pool of usernames for warming
 CONFIG_PATH = BASE_DIR / "config.json"
 LOG_PATH = BASE_DIR / "claims.log"
 
@@ -27,6 +30,8 @@ SESSIONS_DIR.mkdir(exist_ok=True)
 NEW_SESSIONS_DIR.mkdir(exist_ok=True)
 TDATA_DIR.mkdir(exist_ok=True)
 TDATA_ZIPS_DIR.mkdir(exist_ok=True)
+AVATARS_DIR.mkdir(exist_ok=True)
+AVATARS_USED_DIR.mkdir(exist_ok=True)
 
 logger = logging.getLogger("reelsio-claimer")
 logger.setLevel(logging.INFO)
@@ -486,6 +491,133 @@ async def import_tdata_zips(config):
     print(f"\n{c['grn']}Готово: импортировано {imported} из {len(zips)}.{c['reset']}")
 
 
+# ── Warming: set avatar (unique) + username ──────────────────────────────────
+
+_AVATAR_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+def next_avatar():
+    for p in sorted(AVATARS_DIR.iterdir()):
+        if p.is_file() and p.suffix.lower() in _AVATAR_EXTS:
+            return p
+    return None
+
+
+def count_avatars():
+    return sum(1 for p in AVATARS_DIR.iterdir()
+               if p.is_file() and p.suffix.lower() in _AVATAR_EXTS)
+
+
+def load_nicks():
+    if not NICKS_FILE.exists():
+        return []
+    return [ln.strip() for ln in NICKS_FILE.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def save_nicks(nicks):
+    NICKS_FILE.write_text("\n".join(nicks) + ("\n" if nicks else ""), encoding="utf-8")
+
+
+async def warm_account(client, account_label, set_avatar, set_username):
+    account_logger = logging.getLogger(f"reelsio-claimer.{account_label}")
+    account_logger.handlers = logger.handlers
+    account_logger.propagate = False
+    account_logger.setLevel(logging.INFO)
+
+    if set_avatar:
+        avatar = next_avatar()
+        if avatar is None:
+            account_logger.warning("No avatars left in avatars/")
+        else:
+            try:
+                uploaded = await client.upload_file(str(avatar))
+                await client(functions.photos.UploadProfilePhotoRequest(file=uploaded))
+                # Move it out of the pool so it's never reused.
+                dest = AVATARS_USED_DIR / avatar.name
+                if dest.exists():
+                    dest = AVATARS_USED_DIR / f"{avatar.stem}_{random.randint(1000,9999)}{avatar.suffix}"
+                shutil.move(str(avatar), str(dest))
+                account_logger.info(f"Avatar set from {avatar.name}")
+            except Exception as e:
+                account_logger.error(f"Avatar failed: {e}")
+
+    if set_username:
+        nicks = load_nicks()
+        if not nicks:
+            account_logger.warning("nicknames.txt is empty")
+            return
+        consumed, done = [], False
+        for name in nicks:
+            try:
+                await client(functions.account.UpdateUsernameRequest(username=name))
+                account_logger.info(f"Username set: @{name}")
+                consumed.append(name)
+                done = True
+                break
+            except errors.FloodWaitError as e:
+                account_logger.warning(f"FloodWait {e.seconds}s on username")
+                await asyncio.sleep(e.seconds)
+                try:
+                    await client(functions.account.UpdateUsernameRequest(username=name))
+                    account_logger.info(f"Username set: @{name}")
+                    consumed.append(name)
+                    done = True
+                    break
+                except Exception as e2:
+                    account_logger.info(f"@{name} failed after wait ({type(e2).__name__}), next")
+                    consumed.append(name)
+                    continue
+            except Exception as e:
+                # occupied / invalid → consume and try the next one
+                account_logger.info(f"@{name} unavailable ({type(e).__name__}), next")
+                consumed.append(name)
+                continue
+        save_nicks([n for n in nicks if n not in consumed])
+        if not done:
+            account_logger.warning("Could not set any username from the list")
+
+
+async def warm_cycle(config, set_avatar, set_username):
+    api_id = config["api_id"]
+    api_hash = config["api_hash"]
+    delay_range = config.get("delay_between_accounts_sec", [5, 30])
+
+    sessions = get_session_files(NEW_SESSIONS_DIR)
+    if not sessions:
+        logger.warning("No session files found in new_sessions/")
+        return
+
+    logger.info(f"Warming {len(sessions)} account(s) from new_sessions/")
+
+    for session_path in sessions:
+        if shutdown_event.is_set():
+            break
+
+        account_label = session_path.stem
+        client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
+
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                logger.warning(f"[{account_label}] Not authorized, skipping")
+                continue
+            await warm_account(client, account_label, set_avatar, set_username)
+        except Exception as e:
+            logger.error(f"[{account_label}] Connection error: {e}")
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+        if not shutdown_event.is_set() and session_path != sessions[-1]:
+            delay = random.uniform(*delay_range)
+            logger.info(f"Waiting {delay:.1f}s before next account...")
+            await asyncio.sleep(delay)
+
+    logger.info("Warming complete")
+
+
 # ── Terminal navigation menu ────────────────────────────────────────────────
 
 _C = {
@@ -600,6 +732,7 @@ def choose_action():
         elif category == "secure_cat":
             sub = prompt_menu("Безопасность аккаунтов:", [
                 ("🔐 Обезопасить (сброс сессий + смена 2FA)", "secure"),
+                ("🔥 Прогрев (аватар + юзернейм)", "warm"),
                 ("📲 Прослушка кода входа (зайти по сессии)", "listen_code"),
                 ("📦 Импорт tdata из zip → new_sessions/", "import_tdata"),
             ])
@@ -640,6 +773,50 @@ async def run_secure(config):
     await secure_cycle(config, old_pw, new_pw, hint, do_reset=True, do_2fa=True, keep_device=keep_device)
 
 
+async def run_warm(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}🔥 Прогрев аккаунтов{c['reset']}")
+    print(f"{c['dim']}Работает с папкой new_sessions/. Аватар берётся из avatars/ "
+          f"(каждый раз новый, использованные уходят в avatars/_used/), "
+          f"юзернейм — из nicknames.txt.{c['reset']}")
+
+    count = len(get_session_files(NEW_SESSIONS_DIR))
+    if count == 0:
+        print(f"{c['yel']}Папка new_sessions/ пуста.{c['reset']}")
+        return
+
+    choice = prompt_menu("Что делаем при прогреве?", [
+        ("🖼️  Аватар + юзернейм", "both"),
+        ("🖼️  Только аватар", "avatar"),
+        ("🏷️  Только юзернейм", "username"),
+    ])
+    if choice is None:
+        return
+    set_avatar = choice in ("both", "avatar")
+    set_username = choice in ("both", "username")
+
+    if set_avatar and count_avatars() == 0:
+        print(f"{c['yel']}В папке avatars/ нет фото — положи туда картинки "
+              f"(.jpg/.png) и запусти снова.{c['reset']}")
+        return
+    if set_username and not load_nicks():
+        print(f"{c['yel']}nicknames.txt пуст.{c['reset']}")
+        return
+
+    avatars_n = count_avatars()
+    nicks_n = len(load_nicks())
+    print(f"\n{c['yel']}Аккаунтов: {count}. "
+          f"{'Аватарок в пуле: ' + str(avatars_n) + '. ' if set_avatar else ''}"
+          f"{'Ников в пуле: ' + str(nicks_n) + '. ' if set_username else ''}{c['reset']}")
+    if set_avatar and avatars_n < count:
+        print(f"{c['dim']}Аватарок меньше, чем аккаунтов — на часть не хватит.{c['reset']}")
+    if input("Продолжить? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
+        print(f"{c['dim']}Отменено.{c['reset']}")
+        return
+
+    await warm_cycle(config, set_avatar, set_username)
+
+
 async def main():
     config = load_config()
     interactive = sys.stdin.isatty()
@@ -653,6 +830,9 @@ async def main():
             return
         if action == "secure":
             await run_secure(config)
+            return
+        if action == "warm":
+            await run_warm(config)
             return
         if action == "listen_code":
             await listen_login_code(config)

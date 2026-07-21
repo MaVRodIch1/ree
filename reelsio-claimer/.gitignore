@@ -9,6 +9,13 @@ tdata_accounts/*/
 tdata_zips/*.zip
 tdata_zips/_extract_*/
 
+# avatar photos for warming (keep local)
+avatars/*.jpg
+avatars/*.jpeg
+avatars/*.png
+avatars/*.webp
+avatars/_used/
+
 # logs
 claims.log
 
