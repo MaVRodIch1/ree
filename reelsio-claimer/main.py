@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -10,7 +11,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
-from telethon import TelegramClient, errors, functions, types
+from telethon import TelegramClient, errors, events, functions, types
 
 BASE_DIR = Path(__file__).resolve().parent
 SESSIONS_DIR = BASE_DIR / "sessions"
@@ -337,6 +338,75 @@ async def secure_cycle(config, old_pw, new_pw, hint, do_reset, do_2fa):
     logger.info("Securing complete")
 
 
+# ── Login-code listener (log in to an account by its session) ────────────────
+
+TELEGRAM_SERVICE_ID = 777000  # official "Telegram" service notifications
+
+
+def extract_login_code(text: str) -> str:
+    if not text:
+        return None
+    # Login codes are 5-6 digits; prefer a standalone group near "code"/"код".
+    m = re.search(r"(?:code|код)\D{0,20}(\d{5,6})", text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r"\b(\d{5,6})\b", text)
+    return m.group(1) if m else None
+
+
+async def listen_login_code(config):
+    c = _C
+    api_id, api_hash = config["api_id"], config["api_hash"]
+
+    all_sessions = get_session_files(NEW_SESSIONS_DIR) + get_session_files(SESSIONS_DIR)
+    if not all_sessions:
+        print(f"{c['yel']}Нет сессий ни в new_sessions/, ни в sessions/.{c['reset']}")
+        return
+
+    print(f"\n{c['cyan']}{c['bold']}📲 Прослушка кода входа{c['reset']}")
+    for i, p in enumerate(all_sessions, 1):
+        print(f"  {c['yel']}{i}{c['reset']}) {p.stem}  {c['dim']}({p.parent.name}/){c['reset']}")
+    raw = input(f"{c['grn']}Выбери номер аккаунта:{c['reset']} ").strip()
+    if not raw.isdigit() or not (1 <= int(raw) <= len(all_sessions)):
+        print(f"{c['dim']}Неверный выбор.{c['reset']}")
+        return
+    session_path = all_sessions[int(raw) - 1]
+
+    client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
+    await client.connect()
+    if not await client.is_user_authorized():
+        print(f"{c['yel']}Сессия {session_path.stem} не авторизована.{c['reset']}")
+        await client.disconnect()
+        return
+
+    me = await client.get_me()
+    print(f"\n{c['grn']}Слушаю коды для {me.first_name} "
+          f"(+{getattr(me, 'phone', session_path.stem)}).{c['reset']}")
+    print(f"{c['dim']}Заходи в официальный Telegram по этому аккаунту — "
+          f"код появится здесь. Ctrl+C для выхода.{c['reset']}")
+
+    # Show any code already sitting in the service chat.
+    recent = await client.get_messages(TELEGRAM_SERVICE_ID, limit=3)
+    for m in reversed(recent):
+        code = extract_login_code(m.message or "")
+        if code:
+            print(f"{c['dim']}Последний код в чате:{c['reset']} {c['bold']}{code}{c['reset']}")
+
+    @client.on(events.NewMessage(from_users=TELEGRAM_SERVICE_ID))
+    async def _handler(event):
+        text = event.message.message or ""
+        code = extract_login_code(text)
+        if code:
+            print(f"\n{c['grn']}{c['bold']}>>> КОД ВХОДА: {code}{c['reset']}\n")
+        else:
+            print(f"{c['dim']}[Telegram] {text}{c['reset']}")
+
+    try:
+        await client.run_until_disconnected()
+    finally:
+        await client.disconnect()
+
+
 # ── Terminal navigation menu ────────────────────────────────────────────────
 
 _C = {
@@ -413,6 +483,7 @@ def choose_action():
         elif category == "secure_cat":
             sub = prompt_menu("Безопасность аккаунтов:", [
                 ("🔐 Обезопасить (сброс сессий + смена 2FA)", "secure"),
+                ("📲 Прослушка кода входа (зайти по сессии)", "listen_code"),
             ])
             if sub:
                 return sub
@@ -459,6 +530,9 @@ async def main():
             return
         if action == "secure":
             await run_secure(config)
+            return
+        if action == "listen_code":
+            await listen_login_code(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
