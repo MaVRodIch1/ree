@@ -1,0 +1,7 @@
+# Split (api.split.tg) API key for buying Telegram Stars.
+# Copy this file to  split_api_key.txt  and put your Bearer token on the
+# first non-comment line. split_api_key.txt is gitignored and never committed.
+#
+# Get the key at https://split.tg/partner
+#
+# your_token_here

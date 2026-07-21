@@ -20,8 +20,8 @@ avatars/_used/
 nicknames.txt
 names.txt
 
-# TON wallet seed phrase — NEVER commit
-wallet.txt
+# Split API key — NEVER commit
+split_api_key.txt
 
 # logs
 claims.log

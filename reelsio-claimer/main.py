@@ -60,6 +60,17 @@ logger.addHandler(_fh)
 shutdown_event = asyncio.Event()
 
 ZONTIQ_BASE = "https://api.zontiq.io/api/v1"
+SPLIT_API_BASE = "https://api.split.tg"
+SPLIT_KEY_FILE = BASE_DIR / "split_api_key.txt"
+
+
+def load_split_key():
+    if SPLIT_KEY_FILE.exists():
+        for ln in SPLIT_KEY_FILE.read_text(encoding="utf-8").splitlines():
+            ln = ln.strip()
+            if ln and not ln.startswith("#"):
+                return ln
+    return ""
 
 
 def load_config() -> dict:
@@ -863,6 +874,149 @@ async def run_warm(config):
     await warm_cycle(config, set_avatar, set_name, set_username)
 
 
+async def choose_folder_sessions(title):
+    folder = prompt_menu(f"{title} — из какой папки?", [
+        ("📁 new_sessions/ (новые)", "new"),
+        ("📁 sessions/ (рабочие)", "old"),
+        ("📁 обе папки", "both"),
+    ])
+    if folder is None:
+        return None
+    if folder == "new":
+        return get_session_files(NEW_SESSIONS_DIR)
+    if folder == "old":
+        return get_session_files(SESSIONS_DIR)
+    return get_session_files(NEW_SESSIONS_DIR) + get_session_files(SESSIONS_DIR)
+
+
+async def run_stars(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}⭐ Пополнение Stars (Split){c['reset']}")
+
+    key = load_split_key()
+    if not key:
+        print(f"{c['yel']}Нет ключа. Скопируй split_api_key.example.txt → "
+              f"split_api_key.txt и вставь свой токен с split.tg/partner.{c['reset']}")
+        return
+
+    headers = {"Authorization": f"Bearer {key}"}
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as s:
+        # Show current Split balance.
+        try:
+            async with s.get(f"{SPLIT_API_BASE}/balance/") as r:
+                bal = (await r.json()).get("message", {})
+            ton = bal.get("ton_balance", {}).get("real", {}).get("available", 0) or 0
+            usdt = bal.get("usdt_balance", {}).get("available", 0) or 0
+            print(f"{c['dim']}Баланс Split: ~{ton/1e9:.4f} TON, ~{usdt/1e6:.2f} USDT{c['reset']}")
+        except Exception as e:
+            print(f"{c['yel']}Не удалось получить баланс: {e}{c['reset']}")
+
+        action = prompt_menu("Что делаем?", [
+            ("⭐ Купить Stars на аккаунты", "buy"),
+            ("💵 Пополнить баланс Split (перевод из Tonkeeper)", "topup"),
+        ])
+        if action is None:
+            return
+
+        if action == "topup":
+            try:
+                amt = float(input("Сколько TON пополнить: ").strip())
+            except ValueError:
+                print(f"{c['yel']}Некорректная сумма.{c['reset']}")
+                return
+            nano = int(amt * 1e9)
+            try:
+                async with s.post(f"{SPLIT_API_BASE}/balance/ton/top-up",
+                                  json={"amount_nanoton": nano}) as r:
+                    data = await r.json()
+            except Exception as e:
+                print(f"{c['yel']}Ошибка: {e}{c['reset']}")
+                return
+            tx = (data.get("message") or {}).get("transaction") or {}
+            msgs = tx.get("messages") or []
+            if msgs:
+                m = msgs[0]
+                print(f"\n{c['grn']}Отправь этот перевод из Tonkeeper:{c['reset']}")
+                print(f"  Адрес:   {m.get('address')}")
+                print(f"  Сумма:   {int(m.get('amount', 0))/1e9:.4f} TON")
+                print(f"  Payload: {m.get('payload') or '(без комментария)'}")
+                print(f"{c['dim']}После подтверждения перевода баланс Split пополнится.{c['reset']}")
+            else:
+                print(json.dumps(data, ensure_ascii=False, indent=2))
+            return
+
+        # action == buy
+        try:
+            qty = int(input("Сколько Stars на КАЖДЫЙ аккаунт (мин. 50): ").strip())
+        except ValueError:
+            print(f"{c['yel']}Некорректное число.{c['reset']}")
+            return
+        if qty < 50:
+            print(f"{c['yel']}Минимум 50 Stars.{c['reset']}")
+            return
+
+        # Price estimate per account.
+        try:
+            async with s.post(f"{SPLIT_API_BASE}/buy/estimate",
+                              json={"quantity": qty, "product": "stars", "method": "balance"}) as r:
+                price = (await r.json()).get("message", {})
+            print(f"{c['dim']}Цена за {qty}★: {price.get('amount')} {price.get('currency')} "
+                  f"(~${price.get('usd_amount')}) на аккаунт{c['reset']}")
+        except Exception as e:
+            print(f"{c['dim']}Оценка цены недоступна: {e}{c['reset']}")
+
+        sessions = await choose_folder_sessions("Купить Stars")
+        if not sessions:
+            return
+
+        print(f"\n{c['yel']}Аккаунтов: {len(sessions)}, по {qty}★ каждому "
+              f"(оплата с баланса Split).{c['reset']}")
+        if input("Продолжить? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
+            print(f"{c['dim']}Отменено.{c['reset']}")
+            return
+
+        api_id, api_hash = config["api_id"], config["api_hash"]
+        delay_range = config.get("delay_between_accounts_sec", [5, 30])
+        bought = 0
+
+        for session_path in sessions:
+            if shutdown_event.is_set():
+                break
+            label = session_path.stem
+            client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
+            try:
+                await client.connect()
+                if not await client.is_user_authorized():
+                    logger.warning(f"[{label}] Not authorized, skipping")
+                    continue
+                me = await client.get_me()
+                uname = getattr(me, "username", None)
+                if not uname:
+                    logger.warning(f"[{label}] no @username — прогрей аккаунт сначала, пропуск")
+                    continue
+                body = {"username": uname, "quantity": qty, "payment_method": "balance"}
+                async with s.post(f"{SPLIT_API_BASE}/buy/stars", json=body) as r:
+                    res = await r.json()
+                if res.get("ok"):
+                    logger.info(f"[{label}] @{uname}: bought {qty}★")
+                    bought += 1
+                else:
+                    logger.error(f"[{label}] @{uname}: {res.get('error_message') or res}")
+            except Exception as e:
+                logger.error(f"[{label}] error: {e}")
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+            if not shutdown_event.is_set() and session_path != sessions[-1]:
+                await asyncio.sleep(random.uniform(*delay_range))
+
+        print(f"\n{c['grn']}Готово: Stars куплены на {bought} аккаунт(ов).{c['reset']}")
+
+
 async def main():
     config = load_config()
     interactive = sys.stdin.isatty()
@@ -885,6 +1039,9 @@ async def main():
             return
         if action == "import_tdata":
             await import_tdata_zips(config)
+            return
+        if action == "topup_stars":
+            await run_stars(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
