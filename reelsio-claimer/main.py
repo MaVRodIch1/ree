@@ -10,7 +10,7 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import aiohttp
 from telethon import TelegramClient, errors, events, functions, types
@@ -982,11 +982,22 @@ async def run_stars(config):
             msgs = tx.get("messages") or []
             if msgs:
                 m = msgs[0]
-                print(f"\n{c['grn']}Отправь этот перевод из Tonkeeper:{c['reset']}")
-                print(f"  Адрес:   {m.get('address')}")
-                print(f"  Сумма:   {int(m.get('amount', 0))/1e9:.4f} TON")
-                print(f"  Payload: {m.get('payload') or '(без комментария)'}")
-                print(f"{c['dim']}После подтверждения перевода баланс Split пополнится.{c['reset']}")
+                addr = m.get("address")
+                amount_nano = int(m.get("amount", 0))
+                payload = m.get("payload")
+                # Build a Tonkeeper deeplink so the payload (which identifies
+                # your deposit) is attached — a plain manual send WITHOUT this
+                # payload will NOT be credited by Split.
+                link = f"https://app.tonkeeper.com/transfer/{addr}?amount={amount_nano}"
+                if payload:
+                    link += f"&bin={quote(payload, safe='')}"
+                print(f"\n{c['grn']}Открой эту ссылку — Tonkeeper подставит адрес, "
+                      f"сумму и payload:{c['reset']}")
+                print(f"  {c['bold']}{link}{c['reset']}")
+                print(f"{c['dim']}Сумма: {amount_nano/1e9:.4f} TON. Payload обязателен — "
+                      f"без него Split не зачислит депозит.{c['reset']}")
+                print(f"{c['dim']}После подтверждения перевода баланс обновится через "
+                      f"~1-2 мин (перепроверь, зайдя в раздел заново).{c['reset']}")
             else:
                 print(json.dumps(data, ensure_ascii=False, indent=2))
             return
