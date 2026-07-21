@@ -16,6 +16,10 @@ avatars/*.png
 avatars/*.webp
 avatars/_used/
 
+# working name/username pools — consumed locally, seeded from *.example.txt
+nicknames.txt
+names.txt
+
 # logs
 claims.log
 

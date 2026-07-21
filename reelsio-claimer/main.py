@@ -34,6 +34,17 @@ TDATA_ZIPS_DIR.mkdir(exist_ok=True)
 AVATARS_DIR.mkdir(exist_ok=True)
 AVATARS_USED_DIR.mkdir(exist_ok=True)
 
+
+def _bootstrap_pool(working: Path, example: Path):
+    # Working pools are consumed locally and gitignored; seed them from the
+    # tracked *.example.txt template on first run so a fresh clone has data.
+    if not working.exists() and example.exists():
+        working.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+_bootstrap_pool(NICKS_FILE, BASE_DIR / "nicknames.example.txt")
+_bootstrap_pool(NAMES_FILE, BASE_DIR / "names.example.txt")
+
 logger = logging.getLogger("reelsio-claimer")
 logger.setLevel(logging.INFO)
 _fmt = logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
