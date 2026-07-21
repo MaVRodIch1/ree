@@ -23,6 +23,7 @@ TDATA_ZIPS_DIR = BASE_DIR / "tdata_zips"  # drop tdata .zip archives here to imp
 AVATARS_DIR = BASE_DIR / "avatars"  # profile photos for warming
 AVATARS_USED_DIR = AVATARS_DIR / "_used"  # used photos moved here, never reused
 NICKS_FILE = BASE_DIR / "nicknames.txt"  # pool of usernames for warming
+NAMES_FILE = BASE_DIR / "names.txt"  # pool of display names (First Last) for warming
 CONFIG_PATH = BASE_DIR / "config.json"
 LOG_PATH = BASE_DIR / "claims.log"
 
@@ -518,7 +519,13 @@ def save_nicks(nicks):
     NICKS_FILE.write_text("\n".join(nicks) + ("\n" if nicks else ""), encoding="utf-8")
 
 
-async def warm_account(client, account_label, set_avatar, set_username):
+def load_names():
+    if not NAMES_FILE.exists():
+        return []
+    return [ln.strip() for ln in NAMES_FILE.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+async def warm_account(client, account_label, set_avatar, set_name, set_username):
     account_logger = logging.getLogger(f"reelsio-claimer.{account_label}")
     account_logger.handlers = logger.handlers
     account_logger.propagate = False
@@ -540,6 +547,21 @@ async def warm_account(client, account_label, set_avatar, set_username):
                 account_logger.info(f"Avatar set from {avatar.name}")
             except Exception as e:
                 account_logger.error(f"Avatar failed: {e}")
+
+    if set_name:
+        names = load_names()
+        if not names:
+            account_logger.warning("names.txt is empty")
+        else:
+            full = random.choice(names)
+            first, _, last = full.partition(" ")
+            try:
+                await client(functions.account.UpdateProfileRequest(
+                    first_name=first, last_name=last
+                ))
+                account_logger.info(f"Name set: {full}")
+            except Exception as e:
+                account_logger.error(f"Name failed: {e}")
 
     if set_username:
         nicks = load_nicks()
@@ -577,7 +599,7 @@ async def warm_account(client, account_label, set_avatar, set_username):
             account_logger.warning("Could not set any username from the list")
 
 
-async def warm_cycle(config, set_avatar, set_username):
+async def warm_cycle(config, set_avatar, set_name, set_username):
     api_id = config["api_id"]
     api_hash = config["api_hash"]
     delay_range = config.get("delay_between_accounts_sec", [5, 30])
@@ -601,7 +623,7 @@ async def warm_cycle(config, set_avatar, set_username):
             if not await client.is_user_authorized():
                 logger.warning(f"[{account_label}] Not authorized, skipping")
                 continue
-            await warm_account(client, account_label, set_avatar, set_username)
+            await warm_account(client, account_label, set_avatar, set_name, set_username)
         except Exception as e:
             logger.error(f"[{account_label}] Connection error: {e}")
         finally:
@@ -785,36 +807,40 @@ async def run_warm(config):
         print(f"{c['yel']}Папка new_sessions/ пуста.{c['reset']}")
         return
 
-    choice = prompt_menu("Что делаем при прогреве?", [
-        ("🖼️  Аватар + юзернейм", "both"),
-        ("🖼️  Только аватар", "avatar"),
-        ("🏷️  Только юзернейм", "username"),
-    ])
-    if choice is None:
-        return
-    set_avatar = choice in ("both", "avatar")
-    set_username = choice in ("both", "username")
+    def ask(q):
+        return input(f"{c['grn']}{q} (y/n) [y]:{c['reset']} ").strip().lower() in ("", "y", "yes", "да")
 
+    print(f"{c['dim']}Отметь, что менять при прогреве:{c['reset']}")
+    set_avatar = ask("🖼️  Ставить аватар")
+    set_name = ask("📝 Менять имя профиля")
+    set_username = ask("🏷️  Менять юзернейм")
+
+    if not (set_avatar or set_name or set_username):
+        print(f"{c['yel']}Ничего не выбрано — отмена.{c['reset']}")
+        return
     if set_avatar and count_avatars() == 0:
         print(f"{c['yel']}В папке avatars/ нет фото — положи туда картинки "
               f"(.jpg/.png) и запусти снова.{c['reset']}")
+        return
+    if set_name and not load_names():
+        print(f"{c['yel']}names.txt пуст.{c['reset']}")
         return
     if set_username and not load_nicks():
         print(f"{c['yel']}nicknames.txt пуст.{c['reset']}")
         return
 
     avatars_n = count_avatars()
-    nicks_n = len(load_nicks())
     print(f"\n{c['yel']}Аккаунтов: {count}. "
           f"{'Аватарок в пуле: ' + str(avatars_n) + '. ' if set_avatar else ''}"
-          f"{'Ников в пуле: ' + str(nicks_n) + '. ' if set_username else ''}{c['reset']}")
+          f"{'Имён: ' + str(len(load_names())) + '. ' if set_name else ''}"
+          f"{'Ников: ' + str(len(load_nicks())) + '. ' if set_username else ''}{c['reset']}")
     if set_avatar and avatars_n < count:
         print(f"{c['dim']}Аватарок меньше, чем аккаунтов — на часть не хватит.{c['reset']}")
     if input("Продолжить? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
         print(f"{c['dim']}Отменено.{c['reset']}")
         return
 
-    await warm_cycle(config, set_avatar, set_username)
+    await warm_cycle(config, set_avatar, set_name, set_username)
 
 
 async def main():
