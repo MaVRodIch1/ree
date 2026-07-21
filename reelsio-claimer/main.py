@@ -874,7 +874,7 @@ async def run_warm(config):
     await warm_cycle(config, set_avatar, set_name, set_username)
 
 
-async def choose_folder_sessions(title):
+def _folder_files(title):
     folder = prompt_menu(f"{title} — из какой папки?", [
         ("📁 new_sessions/ (новые)", "new"),
         ("📁 sessions/ (рабочие)", "old"),
@@ -887,6 +887,51 @@ async def choose_folder_sessions(title):
     if folder == "old":
         return get_session_files(SESSIONS_DIR)
     return get_session_files(NEW_SESSIONS_DIR) + get_session_files(SESSIONS_DIR)
+
+
+async def choose_folder_sessions(title):
+    return _folder_files(title)
+
+
+def _parse_selection(raw, n):
+    picked = set()
+    for part in raw.replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            if a.isdigit() and b.isdigit():
+                for i in range(int(a), int(b) + 1):
+                    if 1 <= i <= n:
+                        picked.add(i)
+        elif part.isdigit() and 1 <= int(part) <= n:
+            picked.add(int(part))
+    return sorted(picked)
+
+
+async def multi_pick_sessions(title):
+    """Choose folder, optional search, then multi-select by numbers/ranges."""
+    c = _C
+    files = _folder_files(title)
+    if not files:
+        return None
+    query = input(f"{c['grn']}Поиск по имени/номеру (Enter — все):{c['reset']} ").strip().lower()
+    if query:
+        files = [f for f in files if query in f.stem.lower()]
+    if not files:
+        print(f"{c['yel']}Ничего не найдено.{c['reset']}")
+        return None
+
+    for i, p in enumerate(files, 1):
+        print(f"  {c['yel']}{i}{c['reset']}) {p.stem}  {c['dim']}({p.parent.name}/){c['reset']}")
+    raw = input(f"{c['grn']}Номера через запятую (1,3,5-8) или 'all':{c['reset']} ").strip().lower()
+    if raw in ("all", "все", "*"):
+        return files
+    idx = _parse_selection(raw, len(files))
+    if not idx:
+        print(f"{c['yel']}Ничего не выбрано.{c['reset']}")
+        return None
+    return [files[i - 1] for i in idx]
 
 
 async def run_stars(config):
@@ -948,7 +993,7 @@ async def run_stars(config):
 
         # action == buy
         try:
-            qty = int(input("Сколько Stars на КАЖДЫЙ аккаунт (мин. 50): ").strip())
+            qty = int(input("Сколько Stars (мин. 50): ").strip())
         except ValueError:
             print(f"{c['yel']}Некорректное число.{c['reset']}")
             return
@@ -956,17 +1001,52 @@ async def run_stars(config):
             print(f"{c['yel']}Минимум 50 Stars.{c['reset']}")
             return
 
-        # Price estimate per account.
+        # Price estimate.
         try:
             async with s.post(f"{SPLIT_API_BASE}/buy/estimate",
                               json={"quantity": qty, "product": "stars", "method": "balance"}) as r:
                 price = (await r.json()).get("message", {})
             print(f"{c['dim']}Цена за {qty}★: {price.get('amount')} {price.get('currency')} "
-                  f"(~${price.get('usd_amount')}) на аккаунт{c['reset']}")
+                  f"(~${price.get('usd_amount')}){c['reset']}")
         except Exception as e:
             print(f"{c['dim']}Оценка цены недоступна: {e}{c['reset']}")
 
-        sessions = await choose_folder_sessions("Купить Stars")
+        async def buy_for(uname):
+            body = {"username": uname, "quantity": qty, "payment_method": "balance"}
+            async with s.post(f"{SPLIT_API_BASE}/buy/stars", json=body) as r:
+                return await r.json()
+
+        target = prompt_menu("Кому покупаем?", [
+            ("👤 Одному — ввести @username вручную", "single"),
+            ("✅ Выбрать аккаунты из папки", "select"),
+            ("📂 Все аккаунты из папки", "all"),
+        ])
+        if target is None:
+            return
+
+        # Single: buy for a manually typed username, no sessions needed.
+        if target == "single":
+            uname = input("@username получателя: ").strip().lstrip("@")
+            if not uname:
+                print(f"{c['yel']}Пустой username.{c['reset']}")
+                return
+            if input(f"Купить {qty}★ для @{uname}? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
+                return
+            try:
+                res = await buy_for(uname)
+                if res.get("ok"):
+                    print(f"{c['grn']}@{uname}: куплено {qty}★{c['reset']}")
+                else:
+                    print(f"{c['yel']}@{uname}: {res.get('error_message') or res}{c['reset']}")
+            except Exception as e:
+                print(f"{c['yel']}Ошибка: {e}{c['reset']}")
+            return
+
+        # Batch: selected or all sessions from a folder.
+        if target == "select":
+            sessions = await multi_pick_sessions("Купить Stars")
+        else:
+            sessions = await choose_folder_sessions("Купить Stars")
         if not sessions:
             return
 
@@ -995,9 +1075,7 @@ async def run_stars(config):
                 if not uname:
                     logger.warning(f"[{label}] no @username — прогрей аккаунт сначала, пропуск")
                     continue
-                body = {"username": uname, "quantity": qty, "payment_method": "balance"}
-                async with s.post(f"{SPLIT_API_BASE}/buy/stars", json=body) as r:
-                    res = await r.json()
+                res = await buy_for(uname)
                 if res.get("ok"):
                     logger.info(f"[{label}] @{uname}: bought {qty}★")
                     bought += 1
