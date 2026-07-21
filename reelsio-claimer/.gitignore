@@ -32,3 +32,6 @@ __pycache__/
 venv/
 venv2/
 .venv/
+
+# generated Tonkeeper top-up link
+topup_link.txt

@@ -991,13 +991,28 @@ async def run_stars(config):
                 link = f"https://app.tonkeeper.com/transfer/{addr}?amount={amount_nano}"
                 if payload:
                     link += f"&bin={quote(payload, safe='')}"
-                print(f"\n{c['grn']}Открой эту ссылку — Tonkeeper подставит адрес, "
-                      f"сумму и payload:{c['reset']}")
-                print(f"  {c['bold']}{link}{c['reset']}")
-                print(f"{c['dim']}Сумма: {amount_nano/1e9:.4f} TON. Payload обязателен — "
-                      f"без него Split не зачислит депозит.{c['reset']}")
-                print(f"{c['dim']}После подтверждения перевода баланс обновится через "
-                      f"~1-2 мин (перепроверь, зайдя в раздел заново).{c['reset']}")
+
+                # Save as a single line (terminal wrapping breaks copy-paste).
+                link_file = BASE_DIR / "topup_link.txt"
+                link_file.write_text(link, encoding="utf-8")
+
+                print(f"\n{c['grn']}Оплати пополнение {amount_nano/1e9:.4f} TON — "
+                      f"через ссылку или QR ниже (Tonkeeper подставит всё сам):{c['reset']}")
+                # Show a scannable QR in the terminal if qrcode is installed.
+                try:
+                    import qrcode
+                    qr = qrcode.QRCode(border=1)
+                    qr.add_data(link)
+                    qr.make(fit=True)
+                    qr.print_ascii(invert=True)
+                    print(f"{c['dim']}Отсканируй QR телефоном с Tonkeeper.{c['reset']}")
+                except ImportError:
+                    print(f"{c['dim']}(QR отключён — установи 'qrcode' для показа QR){c['reset']}")
+
+                print(f"{c['dim']}Ссылка сохранена одной строкой в topup_link.txt "
+                      f"(открой на телефоне с Tonkeeper).{c['reset']}")
+                print(f"{c['dim']}Payload обязателен — без него Split не зачислит депозит. "
+                      f"Баланс обновится через ~1-2 мин (перезайди в раздел).{c['reset']}")
             else:
                 print(json.dumps(data, ensure_ascii=False, indent=2))
             return
