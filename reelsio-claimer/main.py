@@ -1143,11 +1143,58 @@ async def run_stars(config):
 
 # ── Asteroid Shiba farming ───────────────────────────────────────────────────
 
+ASTEROID_WEB = "https://www.asteroidshiba.online"
+
+
+async def asteroid_init_data(client):
+    bot = await client.get_entity(ASTEROID_BOT)
+    full = await client(functions.users.GetFullUserRequest(bot))
+    mb = full.full_user.bot_info.menu_button if full.full_user.bot_info else None
+    url = mb.url if isinstance(mb, types.BotMenuButton) else None
+    if not url:
+        # Fall back to a web_app button on the bot's recent messages.
+        for m in await client.get_messages(bot, limit=5):
+            if not m.buttons:
+                continue
+            for row in m.buttons:
+                for b in row:
+                    bb = getattr(b, "button", None)
+                    if isinstance(bb, (types.KeyboardButtonWebView,
+                                       types.KeyboardButtonSimpleWebView)):
+                        url = bb.url
+                        break
+    if not url:
+        raise RuntimeError("no web app URL for the bot")
+
+    res = await client(functions.messages.RequestWebViewRequest(
+        peer=bot, bot=bot, platform="android", url=url, from_bot_menu=True))
+    frag = parse_qs(urlparse(res.url).fragment)
+    init_data = frag.get("tgWebAppData", [None])[0]
+    if not init_data:
+        raise RuntimeError("tgWebAppData not found")
+    return init_data
+
+
+def _asteroid_body(init_data):
+    user = json.loads(parse_qs(init_data).get("user", ["{}"])[0])
+    return {
+        "firstName": user.get("first_name", ""),
+        "initData": init_data,
+        "photoUrl": user.get("photo_url", ""),
+        "startParam": parse_qs(init_data).get("start_param", [""])[0],
+        "telegramId": user.get("id"),
+        "username": user.get("username", ""),
+    }
+
+
 async def asteroid_account(client, account_label):
     account_logger = logging.getLogger(f"reelsio-claimer.{account_label}")
     account_logger.handlers = logger.handlers
     account_logger.propagate = False
     account_logger.setLevel(logging.INFO)
+
+    # Small pauses everywhere so accounts don't trip flood limits.
+    await asyncio.sleep(random.uniform(1, 3))
 
     # 1) Start the bot with the referral param.
     try:
@@ -1168,11 +1215,32 @@ async def asteroid_account(client, account_label):
             account_logger.warning(f"FloodWait {e.seconds}s joining @{ch}")
         except Exception as e:
             account_logger.info(f"@{ch}: {type(e).__name__} ({e})")
-        await asyncio.sleep(random.uniform(1, 3))
+        await asyncio.sleep(random.uniform(2, 4))
 
-    # 3) Mini app claim actions (Get My Shiba / Check subscriptions / Claim
-    #    Shiba) go through the asteroidshiba.online backend API — endpoints
-    #    pending DevTools capture, wired in once available.
+    # 3) Mini app: check subscriptions, then claim Shiba, via the backend API.
+    try:
+        init_data = await asteroid_init_data(client)
+        body = _asteroid_body(init_data)
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": ASTEROID_WEB,
+            "Referer": ASTEROID_WEB + "/",
+        }
+        async with aiohttp.ClientSession(headers=headers,
+                                         timeout=aiohttp.ClientTimeout(total=30)) as s:
+            await asyncio.sleep(random.uniform(1, 3))
+            async with s.post(f"{ASTEROID_WEB}/api/prelaunch/subscriptions", json=body) as r:
+                subs = await r.text()
+            account_logger.info(f"Subscriptions: {subs[:200]}")
+
+            await asyncio.sleep(random.uniform(2, 4))
+            async with s.post(f"{ASTEROID_WEB}/api/prelaunch/claim", json=body) as r:
+                claim = await r.text()
+            account_logger.info(f"Claim: {claim[:200]}")
+    except errors.FloodWaitError as e:
+        account_logger.warning(f"FloodWait {e.seconds}s on webview")
+    except Exception as e:
+        account_logger.error(f"Mini app claim failed: {e}")
 
 
 async def run_asteroid(config):
