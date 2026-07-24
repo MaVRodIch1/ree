@@ -61,6 +61,11 @@ shutdown_event = asyncio.Event()
 
 ZONTIQ_BASE = "https://api.zontiq.io/api/v1"
 SPLIT_API_BASE = "https://api.split.tg"
+
+# Asteroid Shiba farming
+ASTEROID_BOT = "AsteroidShiba_app_bot"
+ASTEROID_REF = "6128719325"
+ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
 SPLIT_KEY_FILE = BASE_DIR / "split_api_key.txt"
 
 
@@ -782,6 +787,7 @@ def choose_action():
         if category == "farm_bots":
             sub = prompt_menu("Фарм ботов — выбери проект:", [
                 ("🎡 Рилс (Reels.io)", "reels"),
+                ("🪐 Asteroid Shiba", "asteroid"),
             ])
             if sub:
                 return sub
@@ -1135,6 +1141,92 @@ async def run_stars(config):
         print(f"\n{c['grn']}Готово: Stars куплены на {bought} аккаунт(ов).{c['reset']}")
 
 
+# ── Asteroid Shiba farming ───────────────────────────────────────────────────
+
+async def asteroid_account(client, account_label):
+    account_logger = logging.getLogger(f"reelsio-claimer.{account_label}")
+    account_logger.handlers = logger.handlers
+    account_logger.propagate = False
+    account_logger.setLevel(logging.INFO)
+
+    # 1) Start the bot with the referral param.
+    try:
+        await client.send_message(ASTEROID_BOT, f"/start {ASTEROID_REF}")
+        account_logger.info("Started bot with referral")
+    except errors.FloodWaitError as e:
+        account_logger.warning(f"FloodWait {e.seconds}s on /start")
+    except Exception as e:
+        account_logger.error(f"/start failed: {e}")
+    await asyncio.sleep(random.uniform(2, 4))
+
+    # 2) Join both required channels (satisfies "Check subscriptions").
+    for ch in ASTEROID_CHANNELS:
+        try:
+            await client(functions.channels.JoinChannelRequest(ch))
+            account_logger.info(f"Joined @{ch}")
+        except errors.FloodWaitError as e:
+            account_logger.warning(f"FloodWait {e.seconds}s joining @{ch}")
+        except Exception as e:
+            account_logger.info(f"@{ch}: {type(e).__name__} ({e})")
+        await asyncio.sleep(random.uniform(1, 3))
+
+    # 3) Mini app claim actions (Get My Shiba / Check subscriptions / Claim
+    #    Shiba) go through the asteroidshiba.online backend API — endpoints
+    #    pending DevTools capture, wired in once available.
+
+
+async def run_asteroid(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}🪐 Asteroid Shiba — фарм{c['reset']}")
+    print(f"{c['dim']}Реф-загон в @{ASTEROID_BOT} + вступление в "
+          f"@{ASTEROID_CHANNELS[0]} и @{ASTEROID_CHANNELS[1]}.{c['reset']}")
+
+    target = prompt_menu("Аккаунты:", [
+        ("✅ Выбрать вручную", "select"),
+        ("📂 Все из папки", "all"),
+    ])
+    if target is None:
+        return
+    sessions = (await multi_pick_sessions("Asteroid Shiba")) if target == "select" \
+        else (await choose_folder_sessions("Asteroid Shiba"))
+    if not sessions:
+        return
+
+    print(f"\n{c['yel']}Аккаунтов: {len(sessions)}.{c['reset']}")
+    if input("Продолжить? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
+        print(f"{c['dim']}Отменено.{c['reset']}")
+        return
+
+    api_id, api_hash = config["api_id"], config["api_hash"]
+    delay_range = config.get("delay_between_accounts_sec", [5, 30])
+
+    logger.info(f"Asteroid Shiba: {len(sessions)} account(s)")
+    for session_path in sessions:
+        if shutdown_event.is_set():
+            break
+        label = session_path.stem
+        client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                logger.warning(f"[{label}] Not authorized, skipping")
+                continue
+            await asteroid_account(client, label)
+        except Exception as e:
+            logger.error(f"[{label}] error: {e}")
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        if not shutdown_event.is_set() and session_path != sessions[-1]:
+            delay = random.uniform(*delay_range)
+            logger.info(f"Waiting {delay:.1f}s before next account...")
+            await asyncio.sleep(delay)
+
+    logger.info("Asteroid Shiba cycle complete")
+
+
 async def main():
     config = load_config()
     interactive = sys.stdin.isatty()
@@ -1160,6 +1252,9 @@ async def main():
             return
         if action == "topup_stars":
             await run_stars(config)
+            return
+        if action == "asteroid":
+            await run_asteroid(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
