@@ -1193,9 +1193,6 @@ async def asteroid_account(client, account_label):
     account_logger.propagate = False
     account_logger.setLevel(logging.INFO)
 
-    # Small pauses everywhere so accounts don't trip flood limits.
-    await asyncio.sleep(random.uniform(1, 3))
-
     # 1) Start the bot with the referral param.
     try:
         await client.send_message(ASTEROID_BOT, f"/start {ASTEROID_REF}")
