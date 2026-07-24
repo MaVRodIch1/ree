@@ -1207,6 +1207,7 @@ async def asteroid_account(client, account_label):
     await asyncio.sleep(random.uniform(2, 4))
 
     # 2) Join both required channels (satisfies "Check subscriptions").
+    #    Joining is the most flood-sensitive action, so keep a ~10s gap.
     for ch in ASTEROID_CHANNELS:
         try:
             await client(functions.channels.JoinChannelRequest(ch))
@@ -1215,7 +1216,7 @@ async def asteroid_account(client, account_label):
             account_logger.warning(f"FloodWait {e.seconds}s joining @{ch}")
         except Exception as e:
             account_logger.info(f"@{ch}: {type(e).__name__} ({e})")
-        await asyncio.sleep(random.uniform(2, 4))
+        await asyncio.sleep(random.uniform(9, 12))
 
     # 3) Mini app: check subscriptions, then claim Shiba, via the backend API.
     try:
