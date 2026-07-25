@@ -1381,7 +1381,7 @@ async def run_combo(config):
     interval_hours = config.get("interval_hours", 6)
     random_delay_minutes = config.get("random_delay_minutes", 30)
     asteroid_every = 24 * 3600  # seconds
-    last_asteroid = 0.0
+    last_asteroid = None  # None → run on the very first cycle
 
     while not shutdown_event.is_set():
         # Reels every cycle.
@@ -1389,9 +1389,9 @@ async def run_combo(config):
         if shutdown_event.is_set():
             break
 
-        # Asteroids once every ~24h (respecting the skip-list).
+        # Asteroids on the first cycle, then once every ~24h (skip-list respected).
         now = asyncio.get_event_loop().time()
-        if now - last_asteroid >= asteroid_every:
+        if last_asteroid is None or now - last_asteroid >= asteroid_every:
             skip = load_asteroid_skip()
             ast_sessions = [sp for sp in get_session_files() if sp.stem not in skip]
             if ast_sessions:
