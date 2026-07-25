@@ -1374,6 +1374,11 @@ async def run_combo(config):
     ], back=False)
     if reels_mode is None:
         return
+
+    skip_first_reels = input(
+        "Пропустить первый цикл Рилс (сразу к астероидам, для теста)? (y/n) [n]: "
+    ).strip().lower() in ("y", "yes", "да")
+
     if input("Запустить комбо? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
         print(f"{c['dim']}Отменено.{c['reset']}")
         return
@@ -1382,10 +1387,14 @@ async def run_combo(config):
     random_delay_minutes = config.get("random_delay_minutes", 30)
     asteroid_every = 24 * 3600  # seconds
     last_asteroid = None  # None → run on the very first cycle
+    first_cycle = True
 
     while not shutdown_event.is_set():
-        # Reels every cycle.
-        await run_cycle(config, reels_mode)
+        # Reels every cycle (optionally skipped on the very first pass).
+        if first_cycle and skip_first_reels:
+            logger.info("Combo: skipping first Reels cycle (test mode)")
+        else:
+            await run_cycle(config, reels_mode)
         if shutdown_event.is_set():
             break
 
@@ -1401,6 +1410,7 @@ async def run_combo(config):
         if shutdown_event.is_set():
             break
 
+        first_cycle = False
         jitter = random.uniform(0, random_delay_minutes) * 60
         total_sleep = interval_hours * 3600 + jitter
         logger.info(f"Combo: sleeping {total_sleep/3600:.2f}h until next Reels cycle")
