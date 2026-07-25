@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import uuid
 import zipfile
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
@@ -1187,65 +1188,115 @@ def _asteroid_body(init_data):
     }
 
 
+ASTEROID_SKIP_FILE = BASE_DIR / "asteroid_skip.txt"
+
+
+def load_asteroid_skip():
+    if ASTEROID_SKIP_FILE.exists():
+        return {l.strip() for l in ASTEROID_SKIP_FILE.read_text(encoding="utf-8").splitlines() if l.strip()}
+    return set()
+
+
+def add_asteroid_skip(label):
+    with open(ASTEROID_SKIP_FILE, "a", encoding="utf-8") as f:
+        f.write(label + "\n")
+
+
+async def _asteroid_onboard(client, alog):
+    """Fresh account: referral start + join channels + subscriptions."""
+    try:
+        await client.send_message(ASTEROID_BOT, f"/start {ASTEROID_REF}")
+        alog.info("Started bot with referral")
+    except errors.FloodWaitError as e:
+        alog.warning(f"FloodWait {e.seconds}s on /start")
+    except Exception as e:
+        alog.error(f"/start failed: {e}")
+    await asyncio.sleep(random.uniform(2, 4))
+
+    for ch in ASTEROID_CHANNELS:  # joins are the most flood-sensitive → ~10s gap
+        try:
+            await client(functions.channels.JoinChannelRequest(ch))
+            alog.info(f"Joined @{ch}")
+        except errors.FloodWaitError as e:
+            alog.warning(f"FloodWait {e.seconds}s joining @{ch}")
+        except Exception as e:
+            alog.info(f"@{ch}: {type(e).__name__} ({e})")
+        await asyncio.sleep(random.uniform(9, 12))
+
+
 async def asteroid_account(client, account_label):
     account_logger = logging.getLogger(f"reelsio-claimer.{account_label}")
     account_logger.handlers = logger.handlers
     account_logger.propagate = False
     account_logger.setLevel(logging.INFO)
 
-    # 1) Start the bot with the referral param.
-    try:
-        await client.send_message(ASTEROID_BOT, f"/start {ASTEROID_REF}")
-        account_logger.info("Started bot with referral")
-    except errors.FloodWaitError as e:
-        account_logger.warning(f"FloodWait {e.seconds}s on /start")
-    except Exception as e:
-        account_logger.error(f"/start failed: {e}")
-    await asyncio.sleep(random.uniform(2, 4))
+    init_data = await asteroid_init_data(client)
+    body = _asteroid_body(init_data)
+    headers = {
+        "Content-Type": "application/json",
+        "Origin": ASTEROID_WEB,
+        "Referer": ASTEROID_WEB + "/",
+    }
+    async with aiohttp.ClientSession(headers=headers,
+                                     timeout=aiohttp.ClientTimeout(total=30)) as s:
+        async def post(path, extra=None):
+            async with s.post(f"{ASTEROID_WEB}{path}", json={**body, **(extra or {})}) as r:
+                try:
+                    return await r.json(content_type=None)
+                except Exception:
+                    return {"raw": (await r.text())[:200]}
 
-    # 2) Join both required channels (satisfies "Check subscriptions").
-    #    Joining is the most flood-sensitive action, so keep a ~10s gap.
-    for ch in ASTEROID_CHANNELS:
-        try:
-            await client(functions.channels.JoinChannelRequest(ch))
-            account_logger.info(f"Joined @{ch}")
-        except errors.FloodWaitError as e:
-            account_logger.warning(f"FloodWait {e.seconds}s joining @{ch}")
-        except Exception as e:
-            account_logger.info(f"@{ch}: {type(e).__name__} ({e})")
-        await asyncio.sleep(random.uniform(9, 12))
+        # 1) Is this account already claimed (has the Lv0 shiba)?
+        claim = await post("/api/prelaunch/claim")
+        has_shiba = (claim.get("status") or {}).get("has_shiba_lv0")
 
-    # 3) Mini app: check subscriptions, then claim Shiba, via the backend API.
-    try:
-        init_data = await asteroid_init_data(client)
-        body = _asteroid_body(init_data)
-        headers = {
-            "Content-Type": "application/json",
-            "Origin": ASTEROID_WEB,
-            "Referer": ASTEROID_WEB + "/",
-        }
-        async with aiohttp.ClientSession(headers=headers,
-                                         timeout=aiohttp.ClientTimeout(total=30)) as s:
-            await asyncio.sleep(random.uniform(1, 3))
-            async with s.post(f"{ASTEROID_WEB}/api/prelaunch/subscriptions", json=body) as r:
-                subs = await r.text()
-            account_logger.info(f"Subscriptions: {subs[:200]}")
-
+        # 2) If not, onboard once (referral + channels + subs) and re-claim.
+        if not has_shiba:
+            account_logger.info("No shiba yet — onboarding")
+            await _asteroid_onboard(client, account_logger)
+            await post("/api/prelaunch/subscriptions")
             await asyncio.sleep(random.uniform(2, 4))
-            async with s.post(f"{ASTEROID_WEB}/api/prelaunch/claim", json=body) as r:
-                claim = await r.text()
-            account_logger.info(f"Claim: {claim[:200]}")
-    except errors.FloodWaitError as e:
-        account_logger.warning(f"FloodWait {e.seconds}s on webview")
-    except Exception as e:
-        account_logger.error(f"Mini app claim failed: {e}")
+            claim = await post("/api/prelaunch/claim")
+            has_shiba = (claim.get("status") or {}).get("has_shiba_lv0")
+            if not has_shiba:
+                account_logger.warning("Still no shiba after onboarding — skip-listing")
+                add_asteroid_skip(account_label)
+                return
+            account_logger.info("Shiba claimed")
+
+        # 3) Farm the daily asteroid discoveries (up to ~5/day).
+        farmed = 0
+        for _ in range(6):
+            if shutdown_event.is_set():
+                break
+            res = await post("/api/prelaunch/status", {
+                "action": "perform_discovery",
+                "idempotencyKey": f"discovery-{uuid.uuid4()}",
+            })
+            if not res.get("ok"):
+                account_logger.info(f"Discovery stopped: {res}")
+                break
+            disc = res.get("discovery") or {}
+            farmed += 1
+            account_logger.info(
+                f"Discovery {farmed}: {disc.get('outcome')} +{disc.get('reward_astro')} ASTRO "
+                f"(balance {disc.get('astro_balance')}, signals left {disc.get('ready_signals')})"
+            )
+            if (disc.get("ready_signals") or 0) <= 0:
+                break
+            await asyncio.sleep(random.uniform(1, 3))
+
+        if farmed == 0:
+            account_logger.info("No signals ready (daily limit done / resetting)")
+        else:
+            account_logger.info(f"Farmed {farmed} asteroid(s)")
 
 
 async def run_asteroid(config):
     c = _C
     print(f"\n{c['cyan']}{c['bold']}🪐 Asteroid Shiba — фарм{c['reset']}")
-    print(f"{c['dim']}Реф-загон в @{ASTEROID_BOT} + вступление в "
-          f"@{ASTEROID_CHANNELS[0]} и @{ASTEROID_CHANNELS[1]}.{c['reset']}")
+    print(f"{c['dim']}Клейм шибы (для новых) + ежедневная охота на 5 астероидов. "
+          f"Аккаунты без шибы уходят в asteroid_skip.txt и больше не фармятся.{c['reset']}")
 
     target = prompt_menu("Аккаунты:", [
         ("✅ Выбрать вручную", "select"),
@@ -1258,7 +1309,18 @@ async def run_asteroid(config):
     if not sessions:
         return
 
-    print(f"\n{c['yel']}Аккаунтов: {len(sessions)}.{c['reset']}")
+    # Drop accounts already known to be unclaimable.
+    skip = load_asteroid_skip()
+    before = len(sessions)
+    sessions = [sp for sp in sessions if sp.stem not in skip]
+    skipped = before - len(sessions)
+    if skipped:
+        print(f"{c['dim']}Пропущено {skipped} из скип-листа (без шибы).{c['reset']}")
+    if not sessions:
+        print(f"{c['yel']}Все выбранные аккаунты в скип-листе.{c['reset']}")
+        return
+
+    print(f"\n{c['yel']}Аккаунтов к фарму: {len(sessions)}.{c['reset']}")
     if input("Продолжить? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
         print(f"{c['dim']}Отменено.{c['reset']}")
         return

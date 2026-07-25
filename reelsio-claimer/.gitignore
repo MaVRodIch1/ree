@@ -35,3 +35,6 @@ venv2/
 
 # generated Tonkeeper top-up link
 topup_link.txt
+
+# asteroid unclaimable accounts skip-list
+asteroid_skip.txt
