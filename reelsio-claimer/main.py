@@ -789,6 +789,7 @@ def choose_action():
             sub = prompt_menu("Фарм ботов — выбери проект:", [
                 ("🎡 Рилс (Reels.io)", "reels"),
                 ("🪐 Asteroid Shiba", "asteroid"),
+                ("🔁 Комбо: Рилс 6ч + Астероиды 24ч", "combo"),
             ])
             if sub:
                 return sub
@@ -1307,6 +1308,7 @@ async def run_asteroid(config):
     sessions = (await multi_pick_sessions("Asteroid Shiba")) if target == "select" \
         else (await choose_folder_sessions("Asteroid Shiba"))
     if not sessions:
+        print(f"{c['yel']}В выбранной папке нет сессий — выбери sessions/ или обе папки.{c['reset']}")
         return
 
     # Drop accounts already known to be unclaimable.
@@ -1325,6 +1327,11 @@ async def run_asteroid(config):
         print(f"{c['dim']}Отменено.{c['reset']}")
         return
 
+    await asteroid_cycle(config, sessions)
+
+
+async def asteroid_cycle(config, sessions):
+    """Non-interactive: run the Asteroid flow over a list of sessions."""
     api_id, api_hash = config["api_id"], config["api_hash"]
     delay_range = config.get("delay_between_accounts_sec", [5, 30])
 
@@ -1355,6 +1362,56 @@ async def run_asteroid(config):
     logger.info("Asteroid Shiba cycle complete")
 
 
+async def run_combo(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}🔁 Комбо: Рилс (каждые 6ч) + Астероиды (раз в сутки){c['reset']}")
+    print(f"{c['dim']}Работает бесконечно по аккаунтам из sessions/. "
+          f"Ctrl+C для остановки.{c['reset']}")
+
+    reels_mode = prompt_menu("Рилс — режим:", [
+        ("Фарм — только собрать/показать фриспины", "farm"),
+        ("Спин — прокрутить все фриспины", "spin"),
+    ], back=False)
+    if reels_mode is None:
+        return
+    if input("Запустить комбо? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
+        print(f"{c['dim']}Отменено.{c['reset']}")
+        return
+
+    interval_hours = config.get("interval_hours", 6)
+    random_delay_minutes = config.get("random_delay_minutes", 30)
+    asteroid_every = 24 * 3600  # seconds
+    last_asteroid = 0.0
+
+    while not shutdown_event.is_set():
+        # Reels every cycle.
+        await run_cycle(config, reels_mode)
+        if shutdown_event.is_set():
+            break
+
+        # Asteroids once every ~24h (respecting the skip-list).
+        now = asyncio.get_event_loop().time()
+        if now - last_asteroid >= asteroid_every:
+            skip = load_asteroid_skip()
+            ast_sessions = [sp for sp in get_session_files() if sp.stem not in skip]
+            if ast_sessions:
+                logger.info("Combo: daily Asteroid run")
+                await asteroid_cycle(config, ast_sessions)
+            last_asteroid = now
+        if shutdown_event.is_set():
+            break
+
+        jitter = random.uniform(0, random_delay_minutes) * 60
+        total_sleep = interval_hours * 3600 + jitter
+        logger.info(f"Combo: sleeping {total_sleep/3600:.2f}h until next Reels cycle")
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=total_sleep)
+        except asyncio.TimeoutError:
+            pass
+
+    logger.info("Combo stopped")
+
+
 async def main():
     config = load_config()
     interactive = sys.stdin.isatty()
@@ -1383,6 +1440,9 @@ async def main():
             return
         if action == "asteroid":
             await run_asteroid(config)
+            return
+        if action == "combo":
+            await run_combo(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
