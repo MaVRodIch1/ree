@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -88,6 +89,70 @@ def load_split_key():
             if ln and not ln.startswith("#"):
                 return ln
     return ""
+
+
+# ── Progress tracking (resume after a crash/restart) ─────────────────────────
+
+PROGRESS_FILE = BASE_DIR / "progress.json"
+
+
+def _load_progress():
+    if PROGRESS_FILE.exists():
+        try:
+            return json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def progress_done(task, window):
+    """Labels already processed within the current window (else empty)."""
+    entry = _load_progress().get(task) or {}
+    return set(entry.get("done", [])) if entry.get("window") == window else set()
+
+
+def progress_mark(task, window, label):
+    data = _load_progress()
+    entry = data.get(task) or {}
+    if entry.get("window") != window:
+        entry = {"window": window, "done": []}
+    if label not in entry["done"]:
+        entry["done"].append(label)
+    data[task] = entry
+    try:
+        PROGRESS_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Could not save progress: {e}")
+
+
+def daily_window():
+    """Window key for once-a-day tasks (asteroids reset at 00:00 UTC)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def cycle_window(interval_hours):
+    """Window key for the recurring Reels cycle."""
+    return f"slot-{int(time.time() // (interval_hours * 3600))}"
+
+
+def fmt_duration(seconds):
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}ч {m}м"
+    if m:
+        return f"{m}м {s}с"
+    return f"{s}с"
+
+
+def log_eta(idx, total, elapsed, delay_range):
+    """Log 'account i/N, remaining, ETA' using measured pace."""
+    left = total - idx
+    if left <= 0:
+        return
+    per = (elapsed / idx) if idx else (sum(delay_range) / 2 + 3)
+    logger.info(f"Progress: {idx}/{total} done, {left} left, ~{fmt_duration(per * left)} remaining")
 
 
 def load_config() -> dict:
@@ -280,14 +345,27 @@ async def run_cycle(config: dict, mode: str):
     bot_username = config["bot_username"]
     delay_range = config.get("delay_between_accounts_sec", [5, 30])
 
-    sessions = get_session_files()
-    if not sessions:
+    all_sessions = get_session_files()
+    if not all_sessions:
         logger.warning("No session files found in sessions/")
         return
 
-    logger.info(f"Starting '{mode}' cycle for {len(sessions)} account(s)")
+    # Resume: skip accounts already done in this cycle window.
+    window = cycle_window(config.get("interval_hours", 6))
+    done = progress_done("reels", window)
+    sessions = [sp for sp in all_sessions if sp.stem not in done]
+    if done:
+        logger.info(f"Resuming cycle: {len(done)} already done, {len(sessions)} left")
 
-    for session_path in sessions:
+    if not sessions:
+        logger.info("Cycle already complete for this window")
+        return
+
+    total = len(sessions)
+    logger.info(f"Starting '{mode}' cycle for {total} account(s)")
+    started = time.time()
+
+    for i, session_path in enumerate(sessions, 1):
         if shutdown_event.is_set():
             break
 
@@ -298,9 +376,11 @@ async def run_cycle(config: dict, mode: str):
             await client.connect()
             if not await client.is_user_authorized():
                 logger.warning(f"[{account_label}] Not authorized, skipping")
+                progress_mark("reels", window, account_label)
                 continue
 
             await process_account(client, bot_username, account_label, mode)
+            progress_mark("reels", window, account_label)
         except Exception as e:
             logger.error(f"[{account_label}] Connection error: {e}")
         finally:
@@ -308,6 +388,8 @@ async def run_cycle(config: dict, mode: str):
                 await client.disconnect()
             except Exception:
                 pass
+
+        log_eta(i, total, time.time() - started, delay_range)
 
         if not shutdown_event.is_set() and session_path != sessions[-1]:
             delay = random.uniform(*delay_range)
@@ -737,8 +819,21 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24):
     api_id, api_hash = config["api_id"], config["api_hash"]
     delay_range = config.get("delay_between_accounts_sec", [5, 30])
 
-    logger.info(f"Views @{channel}: {len(sessions)} account(s)")
-    for session_path in sessions:
+    task = f"views:{channel}"
+    window = daily_window()
+    done = progress_done(task, window)
+    sessions = [sp for sp in sessions if sp.stem not in done]
+    if done:
+        logger.info(f"Views: {len(done)} already done today, {len(sessions)} left")
+    if not sessions:
+        logger.info(f"Views @{channel}: already done for today")
+        return
+
+    total = len(sessions)
+    logger.info(f"Views @{channel}: {total} account(s)")
+    started = time.time()
+
+    for i, session_path in enumerate(sessions, 1):
         if shutdown_event.is_set():
             break
         label = session_path.stem
@@ -747,8 +842,10 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24):
             await client.connect()
             if not await client.is_user_authorized():
                 logger.warning(f"[{label}] Not authorized, skipping")
+                progress_mark(task, window, label)
                 continue
             await view_channel_posts(client, label, channel, hours)
+            progress_mark(task, window, label)
         except Exception as e:
             logger.error(f"[{label}] error: {e}")
         finally:
@@ -756,6 +853,9 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24):
                 await client.disconnect()
             except Exception:
                 pass
+
+        log_eta(i, total, time.time() - started, delay_range)
+
         if not shutdown_event.is_set() and session_path != sessions[-1]:
             delay = random.uniform(*delay_range)
             logger.info(f"Waiting {delay:.1f}s before next account...")
@@ -1592,8 +1692,21 @@ async def asteroid_cycle(config, sessions):
     api_id, api_hash = config["api_id"], config["api_hash"]
     delay_range = config.get("delay_between_accounts_sec", [5, 30])
 
-    logger.info(f"Asteroid Shiba: {len(sessions)} account(s)")
-    for session_path in sessions:
+    # Resume: asteroids reset daily, so the window is the UTC date.
+    window = daily_window()
+    done = progress_done("asteroid", window)
+    sessions = [sp for sp in sessions if sp.stem not in done]
+    if done:
+        logger.info(f"Asteroid: {len(done)} already done today, {len(sessions)} left")
+    if not sessions:
+        logger.info("Asteroid: already done for today")
+        return
+
+    total = len(sessions)
+    logger.info(f"Asteroid Shiba: {total} account(s)")
+    started = time.time()
+
+    for i, session_path in enumerate(sessions, 1):
         if shutdown_event.is_set():
             break
         label = session_path.stem
@@ -1602,8 +1715,10 @@ async def asteroid_cycle(config, sessions):
             await client.connect()
             if not await client.is_user_authorized():
                 logger.warning(f"[{label}] Not authorized, skipping")
+                progress_mark("asteroid", window, label)
                 continue
             await asteroid_account(client, label)
+            progress_mark("asteroid", window, label)
         except Exception as e:
             logger.error(f"[{label}] error: {e}")
         finally:
@@ -1611,6 +1726,9 @@ async def asteroid_cycle(config, sessions):
                 await client.disconnect()
             except Exception:
                 pass
+
+        log_eta(i, total, time.time() - started, delay_range)
+
         if not shutdown_event.is_set() and session_path != sessions[-1]:
             delay = random.uniform(*delay_range)
             logger.info(f"Waiting {delay:.1f}s before next account...")

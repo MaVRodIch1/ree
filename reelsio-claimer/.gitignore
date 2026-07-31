@@ -42,3 +42,6 @@ asteroid_skip.txt
 # sniper audio files
 sniper_audio/*
 !sniper_audio/.gitkeep
+
+# farming progress state
+progress.json
