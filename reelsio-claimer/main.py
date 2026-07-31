@@ -10,6 +10,7 @@ import subprocess
 import sys
 import uuid
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -67,6 +68,9 @@ SPLIT_API_BASE = "https://api.split.tg"
 ASTEROID_BOT = "AsteroidShiba_app_bot"
 ASTEROID_REF = "6128719325"
 ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
+
+# Channel whose fresh posts get viewed once a day
+VIEWS_CHANNEL = "prosadin"
 SPLIT_KEY_FILE = BASE_DIR / "split_api_key.txt"
 
 
@@ -687,6 +691,97 @@ async def warm_cycle(config, set_avatar, set_name, set_username):
     logger.info("Warming complete")
 
 
+# ── Channel post views ───────────────────────────────────────────────────────
+
+async def view_channel_posts(client, account_label, channel, hours=24):
+    alog = logging.getLogger(f"reelsio-claimer.{account_label}")
+    alog.handlers = logger.handlers
+    alog.propagate = False
+    alog.setLevel(logging.INFO)
+
+    entity = await client.get_entity(channel)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    ids = []
+    async for msg in client.iter_messages(entity, limit=100):
+        if msg.date < cutoff:
+            break
+        ids.append(msg.id)
+
+    if not ids:
+        alog.info(f"@{channel}: no posts in the last {hours}h")
+        return 0
+
+    try:
+        await client(functions.messages.GetMessagesViewsRequest(
+            peer=entity, id=ids, increment=True))
+        await client(functions.channels.ReadHistoryRequest(
+            channel=entity, max_id=max(ids)))
+        alog.info(f"@{channel}: viewed {len(ids)} post(s)")
+        return len(ids)
+    except errors.FloodWaitError as e:
+        alog.warning(f"FloodWait {e.seconds}s on views")
+    except Exception as e:
+        alog.error(f"Views failed: {e}")
+    return 0
+
+
+async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24):
+    api_id, api_hash = config["api_id"], config["api_hash"]
+    delay_range = config.get("delay_between_accounts_sec", [5, 30])
+
+    logger.info(f"Views @{channel}: {len(sessions)} account(s)")
+    for session_path in sessions:
+        if shutdown_event.is_set():
+            break
+        label = session_path.stem
+        client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                logger.warning(f"[{label}] Not authorized, skipping")
+                continue
+            await view_channel_posts(client, label, channel, hours)
+        except Exception as e:
+            logger.error(f"[{label}] error: {e}")
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        if not shutdown_event.is_set() and session_path != sessions[-1]:
+            delay = random.uniform(*delay_range)
+            logger.info(f"Waiting {delay:.1f}s before next account...")
+            await asyncio.sleep(delay)
+
+    logger.info("Views cycle complete")
+
+
+async def run_views(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}👁 Просмотры постов канала{c['reset']}")
+    ch = input(f"Канал без @ [{VIEWS_CHANNEL}]: ").strip().lstrip("@") or VIEWS_CHANNEL
+
+    target = prompt_menu("Аккаунты:", [
+        ("✅ Выбрать вручную", "select"),
+        ("📂 Все из папки", "all"),
+    ])
+    if target is None:
+        return
+    sessions = (await multi_pick_sessions("Просмотры")) if target == "select" \
+        else (await choose_folder_sessions("Просмотры"))
+    if not sessions:
+        print(f"{c['yel']}В выбранной папке нет сессий.{c['reset']}")
+        return
+
+    print(f"\n{c['yel']}Аккаунтов: {len(sessions)} → посты @{ch} за сутки.{c['reset']}")
+    if input("Продолжить? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
+        print(f"{c['dim']}Отменено.{c['reset']}")
+        return
+
+    await views_cycle(config, sessions, ch)
+
+
 # ── Terminal navigation menu ────────────────────────────────────────────────
 
 _C = {
@@ -797,6 +892,7 @@ def choose_action():
             sub = prompt_menu("Пополняшки и прогрев:", [
                 ("✍️  Написать боту", "write_bot"),
                 ("⭐ Пополнить старс", "topup_stars"),
+                ("👁 Просмотры постов канала", "views"),
             ])
             if sub:
                 return sub
@@ -1425,7 +1521,7 @@ async def run_combo(config):
         if shutdown_event.is_set():
             break
 
-        # Asteroids on the first cycle, then once every ~24h (skip-list respected).
+        # Asteroids + channel views on the first cycle, then once every ~24h.
         now = asyncio.get_event_loop().time()
         if last_asteroid is None or now - last_asteroid >= asteroid_every:
             skip = load_asteroid_skip()
@@ -1433,6 +1529,10 @@ async def run_combo(config):
             if ast_sessions:
                 logger.info("Combo: daily Asteroid run")
                 await asteroid_cycle(config, ast_sessions)
+            all_sessions = get_session_files()
+            if all_sessions and not shutdown_event.is_set():
+                logger.info(f"Combo: daily views of @{VIEWS_CHANNEL}")
+                await views_cycle(config, all_sessions)
             last_asteroid = now
         if shutdown_event.is_set():
             break
@@ -1480,6 +1580,9 @@ async def main():
             return
         if action == "combo":
             await run_combo(config)
+            return
+        if action == "views":
+            await run_views(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
