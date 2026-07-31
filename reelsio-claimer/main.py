@@ -1292,6 +1292,33 @@ async def asteroid_account(client, account_label):
         else:
             account_logger.info(f"Farmed {farmed} asteroid(s)")
 
+        # 4) Collect accrued asteroid income, if any.
+        await asyncio.sleep(random.uniform(1, 3))
+        st = await post("/api/prelaunch/status", {"action": "season1_status"})
+        status = st.get("status") or {}
+        collectable = status.get("collectable_astro") or 0
+        account_logger.info(
+            f"Portfolio: {status.get('asteroid_count')} asteroid(s), "
+            f"balance {status.get('astro_balance')}, "
+            f"{status.get('daily_income_astro')}/day, collectable {collectable}"
+        )
+        if collectable > 0:
+            await asyncio.sleep(random.uniform(1, 3))
+            col = await post("/api/prelaunch/status", {
+                "action": "collect_asteroid_income",
+                "idempotencyKey": f"collect-all-{uuid.uuid4()}",
+                "userAsteroidId": None,
+            })
+            if col.get("ok"):
+                cc = col.get("collection") or {}
+                account_logger.info(
+                    f"Collected +{cc.get('collected_astro')} ASTRO from "
+                    f"{cc.get('collected_asteroids')} asteroid(s) "
+                    f"(balance {cc.get('astro_balance')})"
+                )
+            else:
+                account_logger.warning(f"Collect failed: {col}")
+
 
 async def run_asteroid(config):
     c = _C
