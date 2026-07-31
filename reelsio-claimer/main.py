@@ -71,6 +71,13 @@ ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
 
 # Channel whose fresh posts get viewed once a day
 VIEWS_CHANNEL = "prosadin"
+
+# Comment sniper: first paid comment under every new post of a channel
+SNIPER_CHANNEL = "durov_russia"
+SNIPER_TEXT = "@prosadin - легенда ТОНА"
+SNIPER_SESSION = "380992273859"
+SNIPER_AUDIO_DIR = BASE_DIR / "sniper_audio"
+SNIPER_AUDIO_DIR.mkdir(exist_ok=True)
 SPLIT_KEY_FILE = BASE_DIR / "split_api_key.txt"
 
 
@@ -782,6 +789,132 @@ async def run_views(config):
     await views_cycle(config, sessions, ch)
 
 
+# ── Comment sniper: first paid comment under each new post ───────────────────
+
+_SNIPER_AUDIO_EXTS = {".mp3", ".m4a", ".ogg", ".oga", ".wav", ".flac"}
+
+
+def find_sniper_audio():
+    for p in sorted(SNIPER_AUDIO_DIR.iterdir()):
+        if p.is_file() and p.suffix.lower() in _SNIPER_AUDIO_EXTS:
+            return p
+    return None
+
+
+def find_session_by_name(name):
+    digits = "".join(ch for ch in name if ch.isdigit())
+    for p in get_session_files(SESSIONS_DIR) + get_session_files(NEW_SESSIONS_DIR):
+        if p.stem == digits:
+            return p
+    return None
+
+
+async def _sniper_send(client, channel_entity, post_id, text, media, slog):
+    """Post the paid comment under `post_id` as fast as possible."""
+    disc = await client(functions.messages.GetDiscussionMessageRequest(
+        peer=channel_entity, msg_id=post_id))
+    if not disc.messages:
+        slog.warning(f"post {post_id}: no discussion message")
+        return
+    disc_msg = disc.messages[0]
+    group = await client.get_entity(disc_msg.peer_id)
+    stars = getattr(group, "send_paid_messages_stars", None)
+
+    await client(functions.messages.SendMediaRequest(
+        peer=group,
+        media=media,
+        message=text,
+        random_id=random.randrange(-2**63, 2**63),
+        reply_to=types.InputReplyToMessage(reply_to_msg_id=disc_msg.id),
+        allow_paid_stars=stars,
+    ))
+    slog.info(f"post {post_id}: commented"
+              f"{f' for {stars}★' if stars else ''}")
+
+
+async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
+                      session_name=SNIPER_SESSION, audio=None):
+    """Watch `channel` and instantly comment under every new post."""
+    slog = logging.getLogger(f"reelsio-claimer.sniper")
+    slog.handlers = logger.handlers
+    slog.propagate = False
+    slog.setLevel(logging.INFO)
+
+    session_path = find_session_by_name(session_name)
+    if not session_path:
+        slog.error(f"session {session_name} not found in sessions/ or new_sessions/")
+        return
+    audio = audio or find_sniper_audio()
+    if not audio:
+        slog.error("no audio file in sniper_audio/ — put an .mp3 there")
+        return
+
+    client = TelegramClient(str(session_path.with_suffix("")),
+                            int(config["api_id"]), str(config["api_hash"]))
+    await client.connect()
+    if not await client.is_user_authorized():
+        slog.error(f"session {session_path.stem} not authorized")
+        await client.disconnect()
+        return
+
+    channel_entity = await client.get_entity(channel)
+
+    # Pre-upload the audio once so the comment goes out with no upload delay.
+    uploaded = await client.upload_file(str(audio))
+    media = types.InputMediaUploadedDocument(
+        file=uploaded,
+        mime_type="audio/mpeg",
+        attributes=[
+            types.DocumentAttributeAudio(duration=0, title=audio.stem, performer=""),
+            types.DocumentAttributeFilename(file_name=audio.name),
+        ],
+    )
+
+    slog.info(f"Watching @{channel} — will comment as {session_path.stem} "
+              f"with {audio.name}")
+
+    @client.on(events.NewMessage(chats=channel_entity))
+    async def _on_post(event):
+        try:
+            await _sniper_send(client, channel_entity, event.message.id, text, media, slog)
+        except Exception as e:
+            slog.error(f"comment failed: {e} — retrying with fresh upload")
+            try:
+                up = await client.upload_file(str(audio))
+                m2 = types.InputMediaUploadedDocument(
+                    file=up, mime_type="audio/mpeg",
+                    attributes=[
+                        types.DocumentAttributeAudio(duration=0, title=audio.stem, performer=""),
+                        types.DocumentAttributeFilename(file_name=audio.name),
+                    ])
+                await _sniper_send(client, channel_entity, event.message.id, text, m2, slog)
+            except Exception as e2:
+                slog.error(f"retry failed: {e2}")
+
+    try:
+        await client.run_until_disconnected()
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+async def run_sniper(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}🎯 Снайпер комментариев{c['reset']}")
+    ch = input(f"Канал без @ [{SNIPER_CHANNEL}]: ").strip().lstrip("@") or SNIPER_CHANNEL
+    sess = input(f"Сессия (номер) [{SNIPER_SESSION}]: ").strip() or SNIPER_SESSION
+    txt = input(f"Текст [{SNIPER_TEXT}]: ").strip() or SNIPER_TEXT
+
+    audio = find_sniper_audio()
+    if not audio:
+        print(f"{c['yel']}Положи музыкальный файл в sniper_audio/ и запусти снова.{c['reset']}")
+        return
+    print(f"{c['dim']}Файл: {audio.name}. Ctrl+C для остановки.{c['reset']}")
+    await sniper_task(config, ch, txt, sess, audio)
+
+
 # ── Terminal navigation menu ────────────────────────────────────────────────
 
 _C = {
@@ -893,6 +1026,7 @@ def choose_action():
                 ("✍️  Написать боту", "write_bot"),
                 ("⭐ Пополнить старс", "topup_stars"),
                 ("👁 Просмотры постов канала", "views"),
+                ("🎯 Снайпер комментариев (первый коммент)", "sniper"),
             ])
             if sub:
                 return sub
@@ -1502,9 +1636,16 @@ async def run_combo(config):
         "Пропустить первый цикл Рилс (сразу к астероидам, для теста)? (y/n) [n]: "
     ).strip().lower() in ("y", "yes", "да")
 
+    want_sniper = input(
+        f"Держать снайпер комментариев @{SNIPER_CHANNEL} параллельно? (y/n) [y]: "
+    ).strip().lower() in ("", "y", "yes", "да")
+
     if input("Запустить комбо? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
         print(f"{c['dim']}Отменено.{c['reset']}")
         return
+
+    # The sniper runs as a background task so it can fire mid-cycle.
+    sniper = asyncio.create_task(sniper_task(config)) if want_sniper else None
 
     interval_hours = config.get("interval_hours", 6)
     random_delay_minutes = config.get("random_delay_minutes", 30)
@@ -1546,6 +1687,8 @@ async def run_combo(config):
         except asyncio.TimeoutError:
             pass
 
+    if sniper:
+        sniper.cancel()
     logger.info("Combo stopped")
 
 
@@ -1583,6 +1726,9 @@ async def main():
             return
         if action == "views":
             await run_views(config)
+            return
+        if action == "sniper":
+            await run_sniper(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")

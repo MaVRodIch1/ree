@@ -38,3 +38,7 @@ topup_link.txt
 
 # asteroid unclaimable accounts skip-list
 asteroid_skip.txt
+
+# sniper audio files
+sniper_audio/*
+!sniper_audio/.gitkeep
