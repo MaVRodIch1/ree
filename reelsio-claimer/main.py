@@ -60,6 +60,15 @@ _fh = logging.FileHandler(LOG_PATH, encoding="utf-8")
 _fh.setFormatter(_fmt)
 logger.addHandler(_fh)
 
+# Telethon logs every reconnect attempt at WARNING; that floods stderr when a
+# connection flaps, so keep only real errors from the library.
+logging.getLogger("telethon").setLevel(logging.ERROR)
+
+# Sessions held open by a long-running task (e.g. the sniper). Farm cycles skip
+# them: two clients sharing one auth_key make Telegram drop the connection, and
+# Telethon then reconnect-loops forever.
+BUSY_SESSIONS = set()
+
 shutdown_event = asyncio.Event()
 
 ZONTIQ_BASE = "https://api.zontiq.io/api/v1"
@@ -353,7 +362,8 @@ async def run_cycle(config: dict, mode: str):
     # Resume: skip accounts already done in this cycle window.
     window = cycle_window(config.get("interval_hours", 6))
     done = progress_done("reels", window)
-    sessions = [sp for sp in all_sessions if sp.stem not in done]
+    sessions = [sp for sp in all_sessions
+                if sp.stem not in done and sp.stem not in BUSY_SESSIONS]
     if done:
         logger.info(f"Resuming cycle: {len(done)} already done, {len(sessions)} left")
 
@@ -822,7 +832,8 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24):
     task = f"views:{channel}"
     window = daily_window()
     done = progress_done(task, window)
-    sessions = [sp for sp in sessions if sp.stem not in done]
+    sessions = [sp for sp in sessions
+                if sp.stem not in done and sp.stem not in BUSY_SESSIONS]
     if done:
         logger.info(f"Views: {len(done)} already done today, {len(sessions)} left")
     if not sessions:
@@ -972,6 +983,8 @@ async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
 
     slog.info(f"Watching @{channel} — will comment as {session_path.stem} "
               f"with {audio.name}")
+    # Keep farm cycles off this session while the sniper holds it open.
+    BUSY_SESSIONS.add(session_path.stem)
 
     @client.on(events.NewMessage(chats=channel_entity))
     async def _on_post(event):
@@ -994,6 +1007,7 @@ async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
     try:
         await client.run_until_disconnected()
     finally:
+        BUSY_SESSIONS.discard(session_path.stem)
         try:
             await client.disconnect()
         except Exception:
@@ -1695,7 +1709,8 @@ async def asteroid_cycle(config, sessions):
     # Resume: asteroids reset daily, so the window is the UTC date.
     window = daily_window()
     done = progress_done("asteroid", window)
-    sessions = [sp for sp in sessions if sp.stem not in done]
+    sessions = [sp for sp in sessions
+                if sp.stem not in done and sp.stem not in BUSY_SESSIONS]
     if done:
         logger.info(f"Asteroid: {len(done)} already done today, {len(sessions)} left")
     if not sessions:
