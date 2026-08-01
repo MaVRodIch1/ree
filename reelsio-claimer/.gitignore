@@ -45,3 +45,7 @@ sniper_audio/*
 
 # farming progress state
 progress.json
+
+# sniper session (kept out of farm cycles)
+sniper_session/*.session
+sniper_session/*.session-journal

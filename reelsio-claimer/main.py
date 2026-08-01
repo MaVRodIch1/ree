@@ -88,6 +88,9 @@ SNIPER_TEXT = "@prosadin - легенда ТОНА"
 SNIPER_SESSION = "380992273859"
 SNIPER_AUDIO_DIR = BASE_DIR / "sniper_audio"
 SNIPER_AUDIO_DIR.mkdir(exist_ok=True)
+# Keep the sniper's own session here so farm cycles never touch it.
+SNIPER_SESSION_DIR = BASE_DIR / "sniper_session"
+SNIPER_SESSION_DIR.mkdir(exist_ok=True)
 SPLIT_KEY_FILE = BASE_DIR / "split_api_key.txt"
 
 
@@ -913,11 +916,18 @@ def find_sniper_audio():
 
 
 def find_session_by_name(name):
+    """Look in sniper_session/ first — a session kept there is invisible to the
+    farm cycles, so the sniper can hold it open without connection clashes."""
     digits = "".join(ch for ch in name if ch.isdigit())
-    for p in get_session_files(SESSIONS_DIR) + get_session_files(NEW_SESSIONS_DIR):
+    pools = (get_session_files(SNIPER_SESSION_DIR)
+             + get_session_files(SESSIONS_DIR)
+             + get_session_files(NEW_SESSIONS_DIR))
+    for p in pools:
         if p.stem == digits:
             return p
-    return None
+    # Any single session dropped into sniper_session/ is used as-is.
+    lone = get_session_files(SNIPER_SESSION_DIR)
+    return lone[0] if lone else None
 
 
 async def _sniper_send(client, channel_entity, post_id, text, media, slog):
