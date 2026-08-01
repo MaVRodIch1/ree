@@ -377,6 +377,7 @@ async def run_cycle(config: dict, mode: str):
     total = len(sessions)
     logger.info(f"Starting '{mode}' cycle for {total} account(s)")
     started = time.time()
+    alive = dead = 0
 
     for i, session_path in enumerate(sessions, 1):
         if shutdown_event.is_set():
@@ -389,9 +390,11 @@ async def run_cycle(config: dict, mode: str):
             await client.connect()
             if not await client.is_user_authorized():
                 logger.warning(f"[{account_label}] Not authorized, skipping")
+                dead += 1
                 progress_mark("reels", window, account_label)
                 continue
 
+            alive += 1
             await process_account(client, bot_username, account_label, mode)
             progress_mark("reels", window, account_label)
         except Exception as e:
@@ -409,7 +412,7 @@ async def run_cycle(config: dict, mode: str):
             logger.info(f"Waiting {delay:.1f}s before next account...")
             await asyncio.sleep(delay)
 
-    logger.info("Claim cycle complete")
+    logger.info(f"Claim cycle complete — сессий живо: {alive}/{alive + dead}")
 
 
 # ── Account securing: reset other sessions + change 2FA ──────────────────────
@@ -846,6 +849,7 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24):
     total = len(sessions)
     logger.info(f"Views @{channel}: {total} account(s)")
     started = time.time()
+    alive = dead = 0
 
     for i, session_path in enumerate(sessions, 1):
         if shutdown_event.is_set():
@@ -856,8 +860,10 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24):
             await client.connect()
             if not await client.is_user_authorized():
                 logger.warning(f"[{label}] Not authorized, skipping")
+                dead += 1
                 progress_mark(task, window, label)
                 continue
+            alive += 1
             await view_channel_posts(client, label, channel, hours)
             progress_mark(task, window, label)
         except Exception as e:
@@ -875,7 +881,7 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24):
             logger.info(f"Waiting {delay:.1f}s before next account...")
             await asyncio.sleep(delay)
 
-    logger.info("Views cycle complete")
+    logger.info(f"Views cycle complete — сессий живо: {alive}/{alive + dead}")
 
 
 async def run_views(config):
@@ -1730,6 +1736,7 @@ async def asteroid_cycle(config, sessions):
     total = len(sessions)
     logger.info(f"Asteroid Shiba: {total} account(s)")
     started = time.time()
+    alive = dead = 0
 
     for i, session_path in enumerate(sessions, 1):
         if shutdown_event.is_set():
@@ -1740,8 +1747,10 @@ async def asteroid_cycle(config, sessions):
             await client.connect()
             if not await client.is_user_authorized():
                 logger.warning(f"[{label}] Not authorized, skipping")
+                dead += 1
                 progress_mark("asteroid", window, label)
                 continue
+            alive += 1
             await asteroid_account(client, label)
             progress_mark("asteroid", window, label)
         except Exception as e:
@@ -1759,7 +1768,7 @@ async def asteroid_cycle(config, sessions):
             logger.info(f"Waiting {delay:.1f}s before next account...")
             await asyncio.sleep(delay)
 
-    logger.info("Asteroid Shiba cycle complete")
+    logger.info(f"Asteroid Shiba cycle complete — сессий живо: {alive}/{alive + dead}")
 
 
 async def run_combo(config):
@@ -1797,27 +1806,27 @@ async def run_combo(config):
     first_cycle = True
 
     while not shutdown_event.is_set():
+        # Daily block first (views, then asteroids), then the Reels cycle.
+        now = asyncio.get_event_loop().time()
+        if last_asteroid is None or now - last_asteroid >= asteroid_every:
+            all_sessions = get_session_files()
+            if all_sessions:
+                logger.info(f"Combo: daily views of @{VIEWS_CHANNEL}")
+                await views_cycle(config, all_sessions)
+            skip = load_asteroid_skip()
+            ast_sessions = [sp for sp in get_session_files() if sp.stem not in skip]
+            if ast_sessions and not shutdown_event.is_set():
+                logger.info("Combo: daily Asteroid run")
+                await asteroid_cycle(config, ast_sessions)
+            last_asteroid = now
+        if shutdown_event.is_set():
+            break
+
         # Reels every cycle (optionally skipped on the very first pass).
         if first_cycle and skip_first_reels:
             logger.info("Combo: skipping first Reels cycle (test mode)")
         else:
             await run_cycle(config, reels_mode)
-        if shutdown_event.is_set():
-            break
-
-        # Asteroids + channel views on the first cycle, then once every ~24h.
-        now = asyncio.get_event_loop().time()
-        if last_asteroid is None or now - last_asteroid >= asteroid_every:
-            skip = load_asteroid_skip()
-            ast_sessions = [sp for sp in get_session_files() if sp.stem not in skip]
-            if ast_sessions:
-                logger.info("Combo: daily Asteroid run")
-                await asteroid_cycle(config, ast_sessions)
-            all_sessions = get_session_files()
-            if all_sessions and not shutdown_event.is_set():
-                logger.info(f"Combo: daily views of @{VIEWS_CHANNEL}")
-                await views_cycle(config, all_sessions)
-            last_asteroid = now
         if shutdown_event.is_set():
             break
 
