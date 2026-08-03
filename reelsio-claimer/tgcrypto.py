@@ -17,6 +17,9 @@ def _xor(a, b):
 
 
 def ige256_encrypt(data: bytes, key: bytes, iv: bytes) -> bytes:
+    # opentele passes PyQt5 QByteArrays; coerce to real bytes so element
+    # iteration yields ints, not length-1 byte objects.
+    data, key, iv = bytes(data), bytes(key), bytes(iv)
     cipher = AES.new(key, AES.MODE_ECB)
     prev_c, prev_p = iv[:16], iv[16:32]
     out = bytearray()
@@ -29,6 +32,7 @@ def ige256_encrypt(data: bytes, key: bytes, iv: bytes) -> bytes:
 
 
 def ige256_decrypt(data: bytes, key: bytes, iv: bytes) -> bytes:
+    data, key, iv = bytes(data), bytes(key), bytes(iv)
     cipher = AES.new(key, AES.MODE_ECB)
     prev_c, prev_p = iv[:16], iv[16:32]
     out = bytearray()

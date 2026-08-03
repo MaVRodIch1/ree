@@ -5,6 +5,7 @@ import, corrupting api_id/api_hash handling for any TelegramClient
 created afterward in the same process. Isolating the conversion here
 keeps that patch from leaking into main.py's process.
 """
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -13,14 +14,54 @@ SESSIONS_DIR = BASE_DIR / "sessions"
 TDATA_DIR = BASE_DIR / "tdata_accounts"
 
 
+def _patch_opentele_py313():
+    """opentele's @extend_class chokes on the __firstlineno__ /
+    __static_attributes__ dunders that Python 3.13 adds to every class,
+    raising BaseException('err') at import. Add them to its skip-list in
+    the installed utils.py (idempotent, done before importing opentele)."""
+    try:
+        spec = importlib.util.find_spec("opentele")
+        if not spec or not spec.origin:
+            return
+        utils = Path(spec.origin).parent / "utils.py"
+        src = utils.read_text(encoding="utf-8")
+        if "__firstlineno__" in src:
+            return
+        patched = src.replace(
+            '["__abstractmethods__", "__module__", "_abc_impl", "__doc__"]',
+            '["__abstractmethods__", "__module__", "_abc_impl", "__doc__", '
+            '"__firstlineno__", "__static_attributes__"]',
+        )
+        if patched != src:
+            utils.write_text(patched, encoding="utf-8")
+            print("[tdata] patched opentele for Python 3.13")
+    except Exception as e:
+        print(f"[tdata] could not patch opentele: {e}")
+
+
+def _to_telethon(tdesk, out_session_path):
+    """Run opentele's async ToTelethon and make sure the session is saved."""
+    import asyncio
+    from opentele.api import UseCurrentSession
+
+    async def _run():
+        client = await tdesk.ToTelethon(str(out_session_path), UseCurrentSession)
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+    asyncio.run(_run())
+
+
 def convert_one(tdata_dir: str, out_session_path: str):
     """Convert a single tdata folder to <out_session_path>.session."""
+    _patch_opentele_py313()
     try:
         from opentele.td import TDesktop
-        from opentele.tl import TelegramClient as OpenteleClient
         from opentele.exception import OpenTeleException
-    except ImportError:
-        print("[tdata] opentele not installed, cannot convert")
+    except Exception as e:
+        print(f"[tdata] opentele import failed: {e}")
         return
 
     name = Path(out_session_path).name
@@ -33,10 +74,7 @@ def convert_one(tdata_dir: str, out_session_path: str):
         print(f"[tdata] Failed to load tdata for {name}")
         return
     try:
-        tdesk.ToTelethon(
-            str(out_session_path),
-            flag=OpenteleClient.Flag.UseCurrentSession,
-        )
+        _to_telethon(tdesk, out_session_path)
         print(f"[tdata] Converted -> {name}.session")
     except (Exception, OpenTeleException) as e:
         print(f"[tdata] Error converting {name}: {e}")
@@ -50,12 +88,12 @@ def main():
     if not dirs_to_convert:
         return
 
+    _patch_opentele_py313()
     try:
         from opentele.td import TDesktop
-        from opentele.tl import TelegramClient as OpenteleClient
         from opentele.exception import OpenTeleException
-    except ImportError:
-        print("[tdata] opentele not installed, skipping tdata conversion")
+    except Exception as e:
+        print(f"[tdata] opentele import failed: {e}")
         return
 
     for entry in dirs_to_convert:
@@ -69,10 +107,7 @@ def main():
             print(f"[tdata] Failed to load tdata from {entry.name}")
             continue
         try:
-            tdesk.ToTelethon(
-                str(SESSIONS_DIR / session_name),
-                flag=OpenteleClient.Flag.UseCurrentSession,
-            )
+            _to_telethon(tdesk, SESSIONS_DIR / session_name)
             print(f"[tdata] Converted {entry.name} -> {session_name}.session")
         except (Exception, OpenTeleException) as e:
             print(f"[tdata] Error converting {entry.name}: {e}")
