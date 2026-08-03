@@ -54,3 +54,4 @@ sniper_session/*.session-journal
 mega_links.txt
 mega_2fa.txt
 _tmp_mega/
+mega_failed.txt

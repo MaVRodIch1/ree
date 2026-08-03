@@ -1049,6 +1049,7 @@ async def run_sniper(config):
 
 MEGA_LINKS_FILE = BASE_DIR / "mega_links.txt"
 MEGA_2FA_FILE = BASE_DIR / "mega_2fa.txt"
+MEGA_FAILED_FILE = BASE_DIR / "mega_failed.txt"
 
 
 async def import_from_mega(config):
@@ -1079,7 +1080,8 @@ async def import_from_mega(config):
         return
 
     session = None
-    got = skipped = failed = 0
+    got = skipped = 0
+    bad_links = []  # (link, reason)
     started = time.time()
 
     for i, link in enumerate(links, 1):
@@ -1088,14 +1090,14 @@ async def import_from_mega(config):
         try:
             files, session = await asyncio.to_thread(mega_dl.list_folder, link, session)
         except Exception as e:
-            logger.error(f"[{i}/{len(links)}] listing failed: {e}")
-            failed += 1
+            logger.error(f"[{i}/{len(links)}] listing failed: {e}\n    ↳ {link}")
+            bad_links.append((link, f"listing failed: {e}"))
             continue
 
         sess_files = [f for f in files if f["name"].lower().endswith(".session")]
         if not sess_files:
-            logger.warning(f"[{i}/{len(links)}] no .session in folder")
-            failed += 1
+            logger.warning(f"[{i}/{len(links)}] no .session in folder\n    ↳ {link}")
+            bad_links.append((link, "no .session in folder"))
             continue
 
         for f in sess_files:
@@ -1109,8 +1111,8 @@ async def import_from_mega(config):
                 got += 1
                 logger.info(f"[{i}/{len(links)}] downloaded {f['name']}")
             except Exception as e:
-                logger.error(f"[{i}/{len(links)}] {f['name']}: {e}")
-                failed += 1
+                logger.error(f"[{i}/{len(links)}] {f['name']}: {e}\n    ↳ {link}")
+                bad_links.append((link, f"{f['name']}: {e}"))
 
         # Grab the 2FA password too — the securing flow needs the old one.
         pw_file = next((f for f in files if "2fa" in f["name"].lower()
@@ -1130,9 +1132,20 @@ async def import_from_mega(config):
         log_eta(i, len(links), time.time() - started, [1, 2])
 
     print(f"\n{c['grn']}Готово: скачано {got}, пропущено {skipped}, "
-          f"ошибок {failed}.{c['reset']}")
+          f"ошибок {len(bad_links)}.{c['reset']}")
     if MEGA_2FA_FILE.exists():
         print(f"{c['dim']}2FA-пароли сохранены в {MEGA_2FA_FILE.name}{c['reset']}")
+
+    if bad_links:
+        # Save problem links to a file and print them so a bad session is
+        # easy to trace back to its source folder.
+        MEGA_FAILED_FILE.write_text(
+            "\n".join(f"{link}  # {reason}" for link, reason in bad_links) + "\n",
+            encoding="utf-8")
+        print(f"\n{c['yel']}Проблемные ссылки ({len(bad_links)}) — "
+              f"сохранены в {MEGA_FAILED_FILE.name}:{c['reset']}")
+        for link, reason in bad_links:
+            print(f"  {c['dim']}{reason}{c['reset']}\n  {link}")
 
 
 # ── Terminal navigation menu ────────────────────────────────────────────────
