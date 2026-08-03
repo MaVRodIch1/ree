@@ -1184,7 +1184,8 @@ async def convert_mega_tdata(config):
         return
 
     script = BASE_DIR / "tdata_convert.py"
-    done = failed = skipped = 0
+    done = skipped = 0
+    bad = []  # (name, reason)
     for acct_dir in accounts:
         if shutdown_event.is_set():
             break
@@ -1198,7 +1199,7 @@ async def convert_mega_tdata(config):
         tdata_dir = _find_tdata_dir(acct_dir)
         if not tdata_dir:
             logger.warning(f"{name}: no tdata folder found")
-            failed += 1
+            bad.append((name, "no tdata folder"))
             continue
 
         # Isolated subprocess: opentele monkeypatches telethon on import.
@@ -1207,17 +1208,25 @@ async def convert_mega_tdata(config):
             [sys.executable, str(script), str(tdata_dir), str(out_session)],
             capture_output=True, text=True,
         )
-        for line in (result.stdout + result.stderr).splitlines():
-            if line.strip():
-                logger.info(f"  {line.strip()}")
+        out_lines = [l.strip() for l in (result.stdout + result.stderr).splitlines() if l.strip()]
+        for line in out_lines:
+            logger.info(f"  {line}")
         if (NEW_SESSIONS_DIR / f"{name}.session").exists():
             done += 1
             logger.info(f"{name}: converted → new_sessions/")
         else:
-            failed += 1
+            reason = next((l for l in out_lines if "Skipping" in l or "Error" in l
+                           or "Failed" in l or "failed" in l), "unknown error")
+            bad.append((name, reason))
 
     print(f"\n{c['grn']}Готово: сконвертировано {done}, пропущено {skipped}, "
-          f"ошибок {failed}.{c['reset']}")
+          f"ошибок {len(bad)}.{c['reset']}")
+    if bad:
+        report = BASE_DIR / "convert_failed.txt"
+        report.write_text("\n".join(f"{n}  # {r}" for n, r in bad) + "\n", encoding="utf-8")
+        print(f"{c['yel']}Не сконвертировались ({len(bad)}) — в convert_failed.txt:{c['reset']}")
+        for n, r in bad:
+            print(f"  {c['dim']}{n}: {r}{c['reset']}")
 
 
 # ── Terminal navigation menu ────────────────────────────────────────────────
