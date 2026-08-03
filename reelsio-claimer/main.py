@@ -1050,11 +1050,23 @@ async def run_sniper(config):
 MEGA_LINKS_FILE = BASE_DIR / "mega_links.txt"
 MEGA_2FA_FILE = BASE_DIR / "mega_2fa.txt"
 MEGA_FAILED_FILE = BASE_DIR / "mega_failed.txt"
+MEGA_TDATA_DIR = BASE_DIR / "mega_tdata"
+MEGA_TDATA_DIR.mkdir(exist_ok=True)
+
+
+def _mega_account_name(files, folder_id):
+    """Pick an account name from the folder: a phone-looking .session/.json
+    stem if present, else the MEGA folder id."""
+    for f in files:
+        stem = f["name"].rsplit(".", 1)[0]
+        if f["name"].lower().endswith((".session", ".json")) and stem.isdigit():
+            return stem
+    return folder_id
 
 
 async def import_from_mega(config):
     c = _C
-    print(f"\n{c['cyan']}{c['bold']}📥 Импорт сессий с MEGA{c['reset']}")
+    print(f"\n{c['cyan']}{c['bold']}📥 Импорт tdata с MEGA{c['reset']}")
 
     try:
         import mega_dl
@@ -1073,8 +1085,9 @@ async def import_from_mega(config):
         print(f"{c['yel']}mega_links.txt пуст.{c['reset']}")
         return
 
-    print(f"{c['dim']}Ссылок: {len(links)}. Сессии кладутся в new_sessions/, "
-          f"2FA-пароли — в mega_2fa.txt.{c['reset']}")
+    print(f"{c['dim']}Ссылок: {len(links)}. tdata целиком качается в mega_tdata/<номер>/, "
+          f"2FA-пароли — в mega_2fa.txt. Потом конвертируй пунктом "
+          f"«Конвертировать mega_tdata → сессии».{c['reset']}")
     if input("Начать? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
         print(f"{c['dim']}Отменено.{c['reset']}")
         return
@@ -1094,38 +1107,43 @@ async def import_from_mega(config):
             bad_links.append((link, f"listing failed: {e}"))
             continue
 
-        sess_files = [f for f in files if f["name"].lower().endswith(".session")]
-        if not sess_files:
-            logger.warning(f"[{i}/{len(links)}] no .session in folder\n    ↳ {link}")
-            bad_links.append((link, "no .session in folder"))
+        if not files:
+            logger.warning(f"[{i}/{len(links)}] empty folder\n    ↳ {link}")
+            bad_links.append((link, "empty folder"))
             continue
 
-        for f in sess_files:
-            target = NEW_SESSIONS_DIR / f["name"]
-            if target.exists():
-                logger.info(f"[{i}/{len(links)}] {f['name']} already present, skip")
-                skipped += 1
-                continue
-            try:
-                await asyncio.to_thread(mega_dl.download_file, f, NEW_SESSIONS_DIR, session)
-                got += 1
-                logger.info(f"[{i}/{len(links)}] downloaded {f['name']}")
-            except Exception as e:
-                logger.error(f"[{i}/{len(links)}] {f['name']}: {e}\n    ↳ {link}")
-                bad_links.append((link, f"{f['name']}: {e}"))
+        folder_id = mega_dl.parse_folder_link(link)[0]
+        acct = _mega_account_name(files, folder_id)
+        acct_dir = MEGA_TDATA_DIR / acct
+        if acct_dir.exists() and any(acct_dir.rglob("key_datas")):
+            logger.info(f"[{i}/{len(links)}] {acct} already downloaded, skip")
+            skipped += 1
+            continue
 
-        # Grab the 2FA password too — the securing flow needs the old one.
-        pw_file = next((f for f in files if "2fa" in f["name"].lower()
-                        and f["name"].lower().endswith(".txt")), None)
-        if pw_file:
+        try:
+            for f in files:
+                # Drop a redundant leading dir equal to the account name so we
+                # get mega_tdata/<acct>/tdata/... rather than a double nest.
+                rel = f.get("path", f["name"])
+                parts = rel.split("/")
+                if parts and parts[0] == acct:
+                    rel = "/".join(parts[1:]) or f["name"]
+                f2 = dict(f, path=rel)
+                await asyncio.to_thread(mega_dl.download_file, f2, acct_dir, session)
+            got += 1
+            logger.info(f"[{i}/{len(links)}] downloaded tdata for {acct}")
+        except Exception as e:
+            logger.error(f"[{i}/{len(links)}] {acct}: {e}\n    ↳ {link}")
+            bad_links.append((link, f"{acct}: {e}"))
+            continue
+
+        # Pull the 2FA password out of the downloaded tree.
+        pw = next((p for p in acct_dir.rglob("*") if p.is_file()
+                   and "2fa" in p.name.lower() and p.suffix.lower() == ".txt"), None)
+        if pw:
             try:
-                tmp = BASE_DIR / "_tmp_mega"
-                path = await asyncio.to_thread(mega_dl.download_file, pw_file, tmp, session)
-                pw = path.read_text(encoding="utf-8", errors="ignore").strip()
-                label = sess_files[0]["name"].rsplit(".", 1)[0]
                 with open(MEGA_2FA_FILE, "a", encoding="utf-8") as fh:
-                    fh.write(f"{label}:{pw}\n")
-                shutil.rmtree(tmp, ignore_errors=True)
+                    fh.write(f"{acct}:{pw.read_text(encoding='utf-8', errors='ignore').strip()}\n")
             except Exception:
                 pass
 
@@ -1135,10 +1153,10 @@ async def import_from_mega(config):
           f"ошибок {len(bad_links)}.{c['reset']}")
     if MEGA_2FA_FILE.exists():
         print(f"{c['dim']}2FA-пароли сохранены в {MEGA_2FA_FILE.name}{c['reset']}")
+    if got:
+        print(f"{c['dim']}Теперь: меню → «Конвертировать mega_tdata → сессии».{c['reset']}")
 
     if bad_links:
-        # Save problem links to a file and print them so a bad session is
-        # easy to trace back to its source folder.
         MEGA_FAILED_FILE.write_text(
             "\n".join(f"{link}  # {reason}" for link, reason in bad_links) + "\n",
             encoding="utf-8")
@@ -1146,6 +1164,59 @@ async def import_from_mega(config):
               f"сохранены в {MEGA_FAILED_FILE.name}:{c['reset']}")
         for link, reason in bad_links:
             print(f"  {c['dim']}{reason}{c['reset']}\n  {link}")
+
+
+async def convert_mega_tdata(config):
+    """Convert every downloaded tdata in mega_tdata/ into new_sessions/."""
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}🔄 Конвертация mega_tdata → new_sessions/{c['reset']}")
+
+    accounts = [d for d in sorted(MEGA_TDATA_DIR.iterdir()) if d.is_dir()]
+    if not accounts:
+        print(f"{c['yel']}Папка mega_tdata/ пуста — сначала импортируй с MEGA.{c['reset']}")
+        return
+
+    print(f"{c['dim']}Найдено tdata: {len(accounts)}. Конвертация идёт в отдельном "
+          f"процессе (opentele), сессии → new_sessions/.{c['reset']}")
+    if input("Начать? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
+        print(f"{c['dim']}Отменено.{c['reset']}")
+        return
+
+    script = BASE_DIR / "tdata_convert.py"
+    done = failed = skipped = 0
+    for acct_dir in accounts:
+        if shutdown_event.is_set():
+            break
+        name = acct_dir.name
+        out_session = NEW_SESSIONS_DIR / name
+        if (NEW_SESSIONS_DIR / f"{name}.session").exists():
+            logger.info(f"{name}: session already exists, skip")
+            skipped += 1
+            continue
+
+        tdata_dir = _find_tdata_dir(acct_dir)
+        if not tdata_dir:
+            logger.warning(f"{name}: no tdata folder found")
+            failed += 1
+            continue
+
+        # Isolated subprocess: opentele monkeypatches telethon on import.
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, str(script), str(tdata_dir), str(out_session)],
+            capture_output=True, text=True,
+        )
+        for line in (result.stdout + result.stderr).splitlines():
+            if line.strip():
+                logger.info(f"  {line.strip()}")
+        if (NEW_SESSIONS_DIR / f"{name}.session").exists():
+            done += 1
+            logger.info(f"{name}: converted → new_sessions/")
+        else:
+            failed += 1
+
+    print(f"\n{c['grn']}Готово: сконвертировано {done}, пропущено {skipped}, "
+          f"ошибок {failed}.{c['reset']}")
 
 
 # ── Terminal navigation menu ────────────────────────────────────────────────
@@ -1269,7 +1340,8 @@ def choose_action():
                 ("🔥 Прогрев (аватар + юзернейм)", "warm"),
                 ("📲 Прослушка кода входа (зайти по сессии)", "listen_code"),
                 ("📦 Импорт tdata из zip → new_sessions/", "import_tdata"),
-                ("📥 Импорт сессий с MEGA (по ссылкам)", "import_mega"),
+                ("📥 Импорт tdata с MEGA (по ссылкам)", "import_mega"),
+                ("🔄 Конвертировать mega_tdata → сессии", "convert_mega"),
             ])
             if sub:
                 return sub
@@ -1973,6 +2045,9 @@ async def main():
             return
         if action == "import_mega":
             await import_from_mega(config)
+            return
+        if action == "convert_mega":
+            await convert_mega_tdata(config)
             return
         if action == "topup_stars":
             await run_stars(config)

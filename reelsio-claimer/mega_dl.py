@@ -77,7 +77,12 @@ def _api(folder_id, payload, session):
 
 
 def list_folder(url, session=None):
-    """List files in a public folder: [{name, node, key, iv, size}]."""
+    """List every FILE in a public folder tree.
+
+    Each entry: {name, path, node, key, iv, size, folder_id}, where `path`
+    is relative to the folder root (with subfolders), so the full tdata
+    structure can be rebuilt locally.
+    """
     folder_id, folder_key = parse_folder_link(url)
     if not folder_id:
         raise ValueError(f"not a MEGA folder link: {url}")
@@ -85,24 +90,49 @@ def list_folder(url, session=None):
     master = _b64_to_a32(folder_key)
 
     res = _api(folder_id, {"a": "f", "c": 1, "r": 1, "ca": 1}, session)
-    files = []
+    nodes = {}
     for node in res.get("f", []):
-        if node.get("t") != 0:  # 0 = file
-            continue
+        t = node.get("t")
+        info = {"handle": node["h"], "parent": node.get("p"), "type": t,
+                "node": node["h"], "folder_id": folder_id, "size": node.get("s", 0),
+                "name": None, "key": None, "iv": None}
         try:
             enc = node["k"].split(":")[1]
             key = _decrypt_key(_b64_to_a32(enc), master)
-            if len(key) < 8:
-                continue
-            k = (key[0] ^ key[4], key[1] ^ key[5], key[2] ^ key[6], key[3] ^ key[7])
-            iv = (key[4], key[5], 0, 0)
-            name = _decrypt_attr(_b64_decode(node["a"]), k).get("n")
-            if name:
-                files.append({"name": name, "node": node["h"], "key": k,
-                              "iv": iv, "size": node.get("s", 0),
-                              "folder_id": folder_id})
+            if t == 0 and len(key) >= 8:  # file: 8 words → k + iv
+                info["key"] = (key[0] ^ key[4], key[1] ^ key[5],
+                               key[2] ^ key[6], key[3] ^ key[7])
+                info["iv"] = (key[4], key[5], 0, 0)
+                attr_key = info["key"]
+            else:  # folder: single 4-word key
+                info["key"] = key[:4]
+                attr_key = key[:4]
+            info["name"] = _decrypt_attr(_b64_decode(node["a"]), attr_key).get("n")
         except Exception:
+            pass
+        nodes[node["h"]] = info
+
+    def relpath(h):
+        parts = []
+        cur = nodes.get(h)
+        while cur and cur["handle"] != folder_id:
+            if not cur.get("name"):
+                return None
+            parts.append(cur["name"])
+            cur = nodes.get(cur["parent"])
+            if cur is None:
+                break
+        return "/".join(reversed(parts))
+
+    files = []
+    for h, info in nodes.items():
+        if info["type"] != 0 or not info.get("name") or not info.get("key"):
             continue
+        rp = relpath(h)
+        if rp is None:
+            continue
+        info["path"] = rp
+        files.append(info)
     return files, session
 
 
@@ -117,7 +147,7 @@ def download_file(info, dest_dir, session=None):
     ctr = Counter.new(128, initial_value=((info["iv"][0] << 32) + info["iv"][1]) << 64)
     aes = AES.new(_a32_to_str(info["key"]), AES.MODE_CTR, counter=ctr)
 
-    dest = Path(dest_dir) / info["name"]
+    dest = Path(dest_dir) / info.get("path", info["name"])
     dest.parent.mkdir(parents=True, exist_ok=True)
     with session.get(url, stream=True, timeout=120) as r:
         r.raise_for_status()
