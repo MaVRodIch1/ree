@@ -1045,6 +1045,96 @@ async def run_sniper(config):
     await sniper_task(config, ch, txt, sess, audio)
 
 
+# ── MEGA import: pull .session files from public folder links ────────────────
+
+MEGA_LINKS_FILE = BASE_DIR / "mega_links.txt"
+MEGA_2FA_FILE = BASE_DIR / "mega_2fa.txt"
+
+
+async def import_from_mega(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}📥 Импорт сессий с MEGA{c['reset']}")
+
+    try:
+        import mega_dl
+    except ImportError as e:
+        print(f"{c['yel']}Нужны зависимости: pip install requests pycryptodome ({e}){c['reset']}")
+        return
+
+    if not MEGA_LINKS_FILE.exists():
+        print(f"{c['yel']}Создай mega_links.txt и вставь туда ссылки "
+              f"(по одной в строке).{c['reset']}")
+        return
+
+    links = [l.strip() for l in MEGA_LINKS_FILE.read_text(encoding="utf-8").splitlines()
+             if l.strip() and not l.strip().startswith("#")]
+    if not links:
+        print(f"{c['yel']}mega_links.txt пуст.{c['reset']}")
+        return
+
+    print(f"{c['dim']}Ссылок: {len(links)}. Сессии кладутся в new_sessions/, "
+          f"2FA-пароли — в mega_2fa.txt.{c['reset']}")
+    if input("Начать? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
+        print(f"{c['dim']}Отменено.{c['reset']}")
+        return
+
+    session = None
+    got = skipped = failed = 0
+    started = time.time()
+
+    for i, link in enumerate(links, 1):
+        if shutdown_event.is_set():
+            break
+        try:
+            files, session = await asyncio.to_thread(mega_dl.list_folder, link, session)
+        except Exception as e:
+            logger.error(f"[{i}/{len(links)}] listing failed: {e}")
+            failed += 1
+            continue
+
+        sess_files = [f for f in files if f["name"].lower().endswith(".session")]
+        if not sess_files:
+            logger.warning(f"[{i}/{len(links)}] no .session in folder")
+            failed += 1
+            continue
+
+        for f in sess_files:
+            target = NEW_SESSIONS_DIR / f["name"]
+            if target.exists():
+                logger.info(f"[{i}/{len(links)}] {f['name']} already present, skip")
+                skipped += 1
+                continue
+            try:
+                await asyncio.to_thread(mega_dl.download_file, f, NEW_SESSIONS_DIR, session)
+                got += 1
+                logger.info(f"[{i}/{len(links)}] downloaded {f['name']}")
+            except Exception as e:
+                logger.error(f"[{i}/{len(links)}] {f['name']}: {e}")
+                failed += 1
+
+        # Grab the 2FA password too — the securing flow needs the old one.
+        pw_file = next((f for f in files if "2fa" in f["name"].lower()
+                        and f["name"].lower().endswith(".txt")), None)
+        if pw_file:
+            try:
+                tmp = BASE_DIR / "_tmp_mega"
+                path = await asyncio.to_thread(mega_dl.download_file, pw_file, tmp, session)
+                pw = path.read_text(encoding="utf-8", errors="ignore").strip()
+                label = sess_files[0]["name"].rsplit(".", 1)[0]
+                with open(MEGA_2FA_FILE, "a", encoding="utf-8") as fh:
+                    fh.write(f"{label}:{pw}\n")
+                shutil.rmtree(tmp, ignore_errors=True)
+            except Exception:
+                pass
+
+        log_eta(i, len(links), time.time() - started, [1, 2])
+
+    print(f"\n{c['grn']}Готово: скачано {got}, пропущено {skipped}, "
+          f"ошибок {failed}.{c['reset']}")
+    if MEGA_2FA_FILE.exists():
+        print(f"{c['dim']}2FA-пароли сохранены в {MEGA_2FA_FILE.name}{c['reset']}")
+
+
 # ── Terminal navigation menu ────────────────────────────────────────────────
 
 _C = {
@@ -1166,6 +1256,7 @@ def choose_action():
                 ("🔥 Прогрев (аватар + юзернейм)", "warm"),
                 ("📲 Прослушка кода входа (зайти по сессии)", "listen_code"),
                 ("📦 Импорт tdata из zip → new_sessions/", "import_tdata"),
+                ("📥 Импорт сессий с MEGA (по ссылкам)", "import_mega"),
             ])
             if sub:
                 return sub
@@ -1866,6 +1957,9 @@ async def main():
             return
         if action == "import_tdata":
             await import_tdata_zips(config)
+            return
+        if action == "import_mega":
+            await import_from_mega(config)
             return
         if action == "topup_stars":
             await run_stars(config)

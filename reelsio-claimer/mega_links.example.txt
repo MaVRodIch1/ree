@@ -1,0 +1,3 @@
+# Public MEGA folder links, one per line. Copy this file to mega_links.txt
+# and paste your links there (mega_links.txt is gitignored).
+# https://mega.nz/folder/XXXXXXXX#YYYYYYYYYYYYYYYYYYYYYY

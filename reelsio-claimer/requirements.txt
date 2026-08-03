@@ -2,3 +2,5 @@ telethon
 opentele
 aiohttp
 qrcode
+requests
+pycryptodome

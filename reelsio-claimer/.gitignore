@@ -49,3 +49,8 @@ progress.json
 # sniper session (kept out of farm cycles)
 sniper_session/*.session
 sniper_session/*.session-journal
+
+# MEGA links and extracted 2FA passwords
+mega_links.txt
+mega_2fa.txt
+_tmp_mega/
