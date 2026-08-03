@@ -1,6 +1,12 @@
 telethon
-opentele
 aiohttp
 qrcode
 requests
 pycryptodome
+# opentele is needed only for tdata->session conversion. Install it WITHOUT
+# its tgcrypto dependency (which needs a C compiler on Windows) — a pure-Python
+# tgcrypto shim (tgcrypto.py) is bundled:
+#   pip install opentele --no-deps
+#   pip install pyqt5
+opentele
+pyqt5
