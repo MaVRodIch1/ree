@@ -1277,6 +1277,96 @@ async def run_add_sessions(config):
     print(f"\n{c['grn']}Добавлено сессий: {added}.{c['reset']}")
 
 
+async def run_check_sessions(config):
+    """Validate .session files: connect + is_authorized + get_me, and bucket
+    each account into alive / not-authorized / banned / error so it's clear
+    whether the sessions are dead ('AuthKeyUnregistered' → авторизация убита)
+    or the accounts themselves are gone ('UserDeactivatedBan' → бан)."""
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}🩺 Проверка сессий{c['reset']}")
+
+    folder = prompt_menu("Какую папку проверить?", [
+        ("📁 new_sessions/ (новые)", "new"),
+        ("📁 sessions/ (рабочие)", "old"),
+        ("📁 обе папки", "both"),
+    ])
+    if folder is None:
+        return
+    if folder == "new":
+        files = get_session_files(NEW_SESSIONS_DIR)
+    elif folder == "old":
+        files = get_session_files(SESSIONS_DIR)
+    else:
+        files = get_session_files(NEW_SESSIONS_DIR) + get_session_files(SESSIONS_DIR)
+
+    if not files:
+        print(f"{c['yel']}В выбранной папке нет сессий.{c['reset']}")
+        return
+
+    total = len(files)
+    print(f"{c['dim']}Проверяю {total} сессий… (connect + get_me по каждой){c['reset']}")
+
+    api_id, api_hash = int(config["api_id"]), str(config["api_hash"])
+    alive, not_auth, banned, err = [], [], [], []
+
+    for i, path in enumerate(files, 1):
+        name = path.stem
+        client = TelegramClient(str(path.with_suffix("")), api_id, api_hash)
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                not_auth.append(name)
+                print(f"  {c['yel']}[{i}/{total}] ❌ {name} — не авторизована{c['reset']}")
+            else:
+                me = await client.get_me()
+                if me is None:
+                    not_auth.append(name)
+                    print(f"  {c['yel']}[{i}/{total}] ❌ {name} — get_me пустой{c['reset']}")
+                else:
+                    tag = f"@{me.username}" if me.username else str(me.id)
+                    alive.append(name)
+                    print(f"  {c['grn']}[{i}/{total}] ✅ {name} — {me.first_name or ''} ({tag}){c['reset']}")
+        except Exception as e:
+            etype = type(e).__name__
+            if "Deactivated" in etype or "Banned" in etype or "UserDeactivated" in etype:
+                banned.append(name)
+                print(f"  {c['mag']}[{i}/{total}] 🚫 {name} — забанен/удалён ({etype}){c['reset']}")
+            elif "AuthKey" in etype or "Unauthorized" in etype or "SessionRevoked" in etype:
+                not_auth.append(name)
+                print(f"  {c['yel']}[{i}/{total}] ❌ {name} — авторизация убита ({etype}){c['reset']}")
+            else:
+                err.append(name)
+                print(f"  {c['dim']}[{i}/{total}] ⚠️  {name} — ошибка: {etype}: {e}{c['reset']}")
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+    print(f"\n{c['bold']}Итог по {total} сессиям:{c['reset']}")
+    print(f"  {c['grn']}✅ живых:            {len(alive)}{c['reset']}")
+    print(f"  {c['yel']}❌ не авторизованы:  {len(not_auth)}{c['reset']}")
+    print(f"  {c['mag']}🚫 забанены/удалены: {len(banned)}{c['reset']}")
+    print(f"  {c['dim']}⚠️  ошибки сети/др.:  {len(err)}{c['reset']}")
+
+    # Write dead session names to a file so they can be pulled out of the folder.
+    dead = not_auth + banned
+    if dead:
+        report = BASE_DIR / "dead_sessions.txt"
+        report.write_text("\n".join(dead) + "\n", encoding="utf-8")
+        print(f"\n{c['dim']}Список мёртвых сохранён в {report.name} "
+              f"({len(dead)} шт.).{c['reset']}")
+
+    # Interpretation hint.
+    if total and len(not_auth) == total:
+        print(f"\n{c['yel']}Все до одной «не авторизованы» — это почти всегда "
+              f"массовый сброс авторизаций телеграмом при заходе с одного "
+              f"IP/региона. Попробуй прокси (SOCKS5 на аккаунт).{c['reset']}")
+    elif banned and not alive:
+        print(f"\n{c['mag']}Аккаунты забанены — это уже сам товар, а не сессии; "
+              f"прокси тут не поможет.{c['reset']}")
+
+
 # ── Terminal navigation menu ────────────────────────────────────────────────
 
 _C = {
@@ -1395,6 +1485,7 @@ def choose_action():
         elif category == "secure_cat":
             sub = prompt_menu("Безопасность аккаунтов:", [
                 ("➕ Добавить сессии (телефон + код)", "add_sessions"),
+                ("🩺 Проверить сессии (живые/мёртвые)", "check_sessions"),
                 ("🔐 Обезопасить (сброс сессий + смена 2FA)", "secure"),
                 ("🔥 Прогрев (аватар + юзернейм)", "warm"),
                 ("📲 Прослушка кода входа (зайти по сессии)", "listen_code"),
@@ -2092,6 +2183,9 @@ async def main():
             return
         if action == "add_sessions":
             await run_add_sessions(config)
+            return
+        if action == "check_sessions":
+            await run_check_sessions(config)
             return
         if action == "secure":
             await run_secure(config)
