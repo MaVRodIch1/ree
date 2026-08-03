@@ -86,6 +86,7 @@ VIEWS_CHANNEL = "prosadin"
 SNIPER_CHANNEL = "durov_russia"
 SNIPER_TEXT = "@prosadin - легенда ТОНА"
 SNIPER_SESSION = "380992273859"
+SNIPER_POLL_SEC = 1.0  # backup poll interval for the sniper (push is instant)
 SNIPER_AUDIO_DIR = BASE_DIR / "sniper_audio"
 SNIPER_AUDIO_DIR.mkdir(exist_ok=True)
 # Keep the sniper's own session here so farm cycles never touch it.
@@ -999,14 +1000,21 @@ async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
     )
 
     slog.info(f"Watching @{channel} — will comment as {session_path.stem} "
-              f"with {audio.name}")
+              f"with {audio.name} (push + poll {SNIPER_POLL_SEC}s)")
     # Keep farm cycles off this session while the sniper holds it open.
     BUSY_SESSIONS.add(session_path.stem)
 
-    @client.on(events.NewMessage(chats=channel_entity))
-    async def _on_post(event):
+    handled: set[int] = set()  # post ids we've already reacted to (dedup)
+
+    async def fire(post_id: int):
+        # Deduped, non-blocking: whichever source (push/poll) sees the post
+        # first grabs it; the other becomes a no-op. Runs as its own task so a
+        # comment never holds up the next detection.
+        if post_id in handled:
+            return
+        handled.add(post_id)
         try:
-            await _sniper_send(client, channel_entity, event.message.id, text, media, slog)
+            await _sniper_send(client, channel_entity, post_id, text, media, slog)
         except Exception as e:
             slog.error(f"comment failed: {e} — retrying with fresh upload")
             try:
@@ -1017,12 +1025,40 @@ async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
                         types.DocumentAttributeAudio(duration=0, title=audio.stem, performer=""),
                         types.DocumentAttributeFilename(file_name=audio.name),
                     ])
-                await _sniper_send(client, channel_entity, event.message.id, text, m2, slog)
+                await _sniper_send(client, channel_entity, post_id, text, m2, slog)
             except Exception as e2:
                 slog.error(f"retry failed: {e2}")
 
+    # Real-time push updates — fire instantly, without blocking the update loop.
+    @client.on(events.NewMessage(chats=channel_entity))
+    async def _on_post(event):
+        asyncio.create_task(fire(event.message.id))
+
+    async def poll_loop():
+        # Backup path: even if a push update is delayed while farm cycles keep
+        # the event loop busy, this catches the new post within SNIPER_POLL_SEC.
+        # Baseline = current latest id, so we only hit posts published from now.
+        try:
+            latest = await client.get_messages(channel_entity, limit=1)
+            last_id = latest[0].id if latest else 0
+        except Exception:
+            last_id = 0
+        while client.is_connected() and not shutdown_event.is_set():
+            try:
+                msgs = await client.get_messages(channel_entity, limit=5)
+                for m in sorted(msgs, key=lambda x: x.id):
+                    if m.id > last_id and m.id not in handled:
+                        asyncio.create_task(fire(m.id))
+                    last_id = max(last_id, m.id)
+            except Exception as e:
+                slog.debug(f"poll error: {e}")
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=SNIPER_POLL_SEC)
+            except asyncio.TimeoutError:
+                pass
+
     try:
-        await client.run_until_disconnected()
+        await asyncio.gather(client.run_until_disconnected(), poll_loop())
     finally:
         BUSY_SESSIONS.discard(session_path.stem)
         try:
@@ -2099,8 +2135,9 @@ async def asteroid_cycle(config, sessions):
 
 async def run_combo(config):
     c = _C
-    print(f"\n{c['cyan']}{c['bold']}🔁 Комбо: Рилс (каждые 6ч) + Астероиды (раз в сутки){c['reset']}")
+    print(f"\n{c['cyan']}{c['bold']}🔁 Комбо: Рилс (каждые 6ч) + Астероиды/просмотры (раз в сутки){c['reset']}")
     print(f"{c['dim']}Работает бесконечно по аккаунтам из sessions/. "
+          f"Снайпер (если включён) стреляет мгновенно, не мешая циклам. "
           f"Ctrl+C для остановки.{c['reset']}")
 
     reels_mode = prompt_menu("Рилс — режим:", [
@@ -2108,6 +2145,13 @@ async def run_combo(config):
         ("Спин — прокрутить все фриспины", "spin"),
     ], back=False)
     if reels_mode is None:
+        return
+
+    first_task = prompt_menu("С чего начинать каждый цикл?", [
+        (f"👁 Сначала просмотры @{VIEWS_CHANNEL} (потом Рилс)", "views"),
+        ("🎡 Сначала круг Рилс (потом просмотры)", "reels"),
+    ], back=False)
+    if first_task is None:
         return
 
     skip_first_reels = input(
@@ -2131,8 +2175,9 @@ async def run_combo(config):
     last_asteroid = None  # None → run on the very first cycle
     first_cycle = True
 
-    while not shutdown_event.is_set():
-        # Daily block first (views, then asteroids), then the Reels cycle.
+    async def daily_block():
+        # Views of @prosadin, then the daily Asteroid run — gated to once/24h.
+        nonlocal last_asteroid
         now = asyncio.get_event_loop().time()
         if last_asteroid is None or now - last_asteroid >= asteroid_every:
             all_sessions = get_session_files()
@@ -2145,18 +2190,26 @@ async def run_combo(config):
                 logger.info("Combo: daily Asteroid run")
                 await asteroid_cycle(config, ast_sessions)
             last_asteroid = now
-        if shutdown_event.is_set():
-            break
 
-        # Reels every cycle (optionally skipped on the very first pass).
+    async def reels_block():
+        nonlocal first_cycle
         if first_cycle and skip_first_reels:
             logger.info("Combo: skipping first Reels cycle (test mode)")
         else:
             await run_cycle(config, reels_mode)
+        first_cycle = False
+
+    while not shutdown_event.is_set():
+        # Run the two blocks in the order the user picked at startup.
+        blocks = [daily_block, reels_block] if first_task == "views" \
+            else [reels_block, daily_block]
+        for block in blocks:
+            if shutdown_event.is_set():
+                break
+            await block()
         if shutdown_event.is_set():
             break
 
-        first_cycle = False
         jitter = random.uniform(0, random_delay_minutes) * 60
         total_sleep = interval_hours * 3600 + jitter
         logger.info(f"Combo: sleeping {total_sleep/3600:.2f}h until next Reels cycle")
