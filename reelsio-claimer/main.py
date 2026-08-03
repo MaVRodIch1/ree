@@ -571,10 +571,11 @@ def _find_tdata_dir(root: Path):
     for p in root.rglob("tdata"):
         if p.is_dir():
             return p
-    # Fall back: some archives put the tdata contents directly at a top level.
-    for p in [root, *[d for d in root.iterdir() if d.is_dir()]]:
-        if (p / "key_datas").exists() or any(p.glob("D877F783D5D3EF8C*")):
-            return p
+    # tdata is identified by its key_datas file at any depth (the containing
+    # folder may be named by a MEGA handle rather than "tdata").
+    kd = next(root.rglob("key_datas"), None)
+    if kd:
+        return kd.parent
     return None
 
 

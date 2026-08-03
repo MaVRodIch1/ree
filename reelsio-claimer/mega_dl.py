@@ -113,12 +113,14 @@ def list_folder(url, session=None):
         nodes[node["h"]] = info
 
     def relpath(h):
+        # A folder key is occasionally encrypted with a key outside the shared
+        # tree, so its name can't be decrypted. Fall back to its handle for the
+        # path component — the folder is still traversable and tdata is located
+        # by content (key_datas), not by name.
         parts = []
         cur = nodes.get(h)
         while cur and cur["handle"] != folder_id:
-            if not cur.get("name"):
-                return None
-            parts.append(cur["name"])
+            parts.append(cur.get("name") or cur["handle"])
             cur = nodes.get(cur["parent"])
             if cur is None:
                 break
