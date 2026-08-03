@@ -1229,6 +1229,54 @@ async def convert_mega_tdata(config):
             print(f"  {c['dim']}{n}: {r}{c['reset']}")
 
 
+async def run_add_sessions(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}➕ Добавить сессии (телефон + код){c['reset']}")
+
+    target = prompt_menu("Куда сохранять сессии?", [
+        ("📁 new_sessions/ (на прогрев)", NEW_SESSIONS_DIR),
+        ("📁 sessions/ (сразу в фарм)", SESSIONS_DIR),
+    ])
+    if target is None:
+        return
+    out_dir = target
+    api_id, api_hash = int(config["api_id"]), str(config["api_hash"])
+    added = 0
+
+    while not shutdown_event.is_set():
+        phone = input(f"\n{c['grn']}Номер телефона (+79001234567), Enter — выход:{c['reset']} ").strip()
+        if not phone:
+            break
+        name = phone.replace("+", "").replace(" ", "")
+        if (out_dir / f"{name}.session").exists():
+            print(f"{c['yel']}Сессия {name} уже есть в {out_dir.name}/ — пропуск.{c['reset']}")
+            continue
+
+        client = TelegramClient(str(out_dir / name), api_id, api_hash)
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                await client.send_code_request(phone)
+                code = input(f"{c['grn']}Код из Telegram:{c['reset']} ").strip()
+                try:
+                    await client.sign_in(phone, code)
+                except errors.SessionPasswordNeededError:
+                    pw = input(f"{c['grn']}Пароль 2FA:{c['reset']} ").strip()
+                    await client.sign_in(password=pw)
+            me = await client.get_me()
+            added += 1
+            print(f"{c['grn']}✓ {me.first_name} ({me.id}) → {out_dir.name}/{name}.session{c['reset']}")
+        except Exception as e:
+            print(f"{c['yel']}Ошибка: {e}{c['reset']}")
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+    print(f"\n{c['grn']}Добавлено сессий: {added}.{c['reset']}")
+
+
 # ── Terminal navigation menu ────────────────────────────────────────────────
 
 _C = {
@@ -1346,6 +1394,7 @@ def choose_action():
                 return sub
         elif category == "secure_cat":
             sub = prompt_menu("Безопасность аккаунтов:", [
+                ("➕ Добавить сессии (телефон + код)", "add_sessions"),
                 ("🔐 Обезопасить (сброс сессий + смена 2FA)", "secure"),
                 ("🔥 Прогрев (аватар + юзернейм)", "warm"),
                 ("📲 Прослушка кода входа (зайти по сессии)", "listen_code"),
@@ -2040,6 +2089,9 @@ async def main():
     if interactive and not cli_mode:
         action = choose_action()
         if action is None:
+            return
+        if action == "add_sessions":
+            await run_add_sessions(config)
             return
         if action == "secure":
             await run_secure(config)
