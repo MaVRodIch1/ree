@@ -1720,7 +1720,7 @@ def choose_action():
             sub = prompt_menu("Безопасность аккаунтов:", [
                 ("➕ Добавить сессии (телефон + код)", "add_sessions"),
                 ("🩺 Проверить сессии (живые/мёртвые)", "check_sessions"),
-                ("🔐 Обезопасить (сброс сессий + смена 2FA)", "secure"),
+                ("🔐 Обезопасить (2FA и/или сброс сессий)", "secure"),
                 ("🔥 Прогрев (аватар + юзернейм)", "warm"),
                 ("📲 Прослушка кода входа (зайти по сессии)", "listen_code"),
                 ("📦 Импорт tdata из zip → new_sessions/", "import_tdata"),
@@ -1744,25 +1744,52 @@ async def run_secure(config):
               f".session файлы и запусти снова.{c['reset']}")
         return
 
-    old_pw = input("Текущий 2FA пароль (Enter — если 2FA не стоит): ").strip()
-    new_pw = input("Новый 2FA пароль: ").strip()
-    if not new_pw:
-        print(f"{c['yel']}Новый пароль пустой — отмена.{c['reset']}")
+    # Pick which operations to run — they're independent.
+    print(f"{c['dim']}Отметь, что делать (сессии сбрасывать не обязательно — "
+          f"они уже твои; часто нужен только новый пароль):{c['reset']}")
+
+    def ask(q, default_yes=True):
+        d = "y" if default_yes else "n"
+        ans = input(f"{c['grn']}{q} (y/n) [{d}]:{c['reset']} ").strip().lower()
+        if not ans:
+            return default_yes
+        return ans in ("y", "yes", "да")
+
+    do_2fa = ask("🔑 Сменить 2FA пароль", default_yes=True)
+    do_reset = ask("🧹 Сбросить чужие сессии", default_yes=False)
+
+    if not (do_2fa or do_reset):
+        print(f"{c['yel']}Ничего не выбрано — отмена.{c['reset']}")
         return
-    hint = input("Подсказка к паролю (Enter — пропустить): ").strip()
 
-    print(f"{c['dim']}Чтобы НЕ выкинуть своё устройство при сбросе сессий, укажи "
-          f"часть его названия (например 'Nitro' или 'Desktop').{c['reset']}")
-    keep_device = input("Не трогать устройство с названием (Enter — сбросить все чужие): ").strip()
+    old_pw = new_pw = hint = ""
+    if do_2fa:
+        old_pw = input("Текущий 2FA пароль (Enter — если 2FA не стоит): ").strip()
+        new_pw = input("Новый 2FA пароль: ").strip()
+        if not new_pw:
+            print(f"{c['yel']}Новый пароль пустой — отмена.{c['reset']}")
+            return
+        hint = input("Подсказка к паролю (Enter — пропустить): ").strip()
 
+    keep_device = ""
+    if do_reset:
+        print(f"{c['dim']}Чтобы НЕ выкинуть своё устройство при сбросе сессий, укажи "
+              f"часть его названия (например 'Nitro' или 'Desktop').{c['reset']}")
+        keep_device = input("Не трогать устройство с названием (Enter — сбросить все чужие): ").strip()
+
+    ops = []
+    if do_2fa:
+        ops.append("сменён 2FA")
+    if do_reset:
+        ops.append("сброшены чужие сессии"
+                   + (f" (кроме «{keep_device}»)" if keep_device else ""))
     print(f"\n{c['yel']}Будет обработано {count} аккаунт(ов) из new_sessions/: "
-          f"сброшены чужие сессии{' (кроме «' + keep_device + '»)' if keep_device else ''} "
-          f"и установлен новый 2FA.{c['reset']}")
+          f"{', '.join(ops)}.{c['reset']}")
     if input("Продолжить? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
         print(f"{c['dim']}Отменено.{c['reset']}")
         return
 
-    await secure_cycle(config, old_pw, new_pw, hint, do_reset=True, do_2fa=True, keep_device=keep_device)
+    await secure_cycle(config, old_pw, new_pw, hint, do_reset=do_reset, do_2fa=do_2fa, keep_device=keep_device)
 
 
 async def run_warm(config):
