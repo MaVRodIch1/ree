@@ -2386,12 +2386,8 @@ async def run_combo(config):
     if reels_mode is None:
         return
 
-    first_task = prompt_menu("С чего начинать каждый цикл?", [
-        ("👁 Сначала просмотры канала (потом Рилс)", "views"),
-        ("🎡 Сначала круг Рилс (потом просмотры)", "reels"),
-    ], back=False)
-    if first_task is None:
-        return
+    # Each cycle runs Reels first, then the daily (silent views + asteroids).
+    first_task = "reels"
 
     skip_first_reels = input(
         "Пропустить первый цикл Рилс (сразу к астероидам, для теста)? (y/n) [n]: "
