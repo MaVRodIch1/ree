@@ -78,6 +78,9 @@ SPLIT_API_BASE = "https://api.split.tg"
 ASTEROID_BOT = "AsteroidShiba_app_bot"
 ASTEROID_REF = "6128719325"
 ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
+# Temporarily disabled in combo after an anti-bot warning from the project.
+# Set back to True to re-enable the daily Asteroid run inside combo.
+COMBO_ASTEROID_ENABLED = False
 
 # Channel whose fresh posts get viewed once a day
 VIEWS_CHANNEL = "prosadin"
@@ -2374,7 +2377,7 @@ async def asteroid_cycle(config, sessions):
 
 async def run_combo(config):
     c = _C
-    print(f"\n{c['cyan']}{c['bold']}🔁 Комбо: Рилс (каждые 6ч) + Астероиды/просмотры (раз в сутки){c['reset']}")
+    print(f"\n{c['cyan']}{c['bold']}🔁 Комбо: Рилс (каждые 6ч) + просмотры (раз в сутки){c['reset']}")
     print(f"{c['dim']}Работает бесконечно по аккаунтам из sessions/. "
           f"Снайпер (если включён) стреляет мгновенно, не мешая циклам. "
           f"Ctrl+C для остановки.{c['reset']}")
@@ -2386,11 +2389,11 @@ async def run_combo(config):
     if reels_mode is None:
         return
 
-    # Each cycle runs Reels first, then the daily (silent views + asteroids).
+    # Each cycle runs Reels first, then the daily (silent views).
     first_task = "reels"
 
     skip_first_reels = input(
-        "Пропустить первый цикл Рилс (сразу к астероидам, для теста)? (y/n) [n]: "
+        "Пропустить первый цикл Рилс (сразу к дневному блоку, для теста)? (y/n) [n]: "
     ).strip().lower() in ("y", "yes", "да")
 
     want_sniper = input(
@@ -2411,7 +2414,8 @@ async def run_combo(config):
     first_cycle = True
 
     async def daily_block():
-        # Daily channel views (silent) + Asteroid run — gated to once/24h.
+        # Daily channel views (silent). Asteroid run is gated off for now
+        # (COMBO_ASTEROID_ENABLED) after the project's anti-bot warning.
         nonlocal last_asteroid
         now = asyncio.get_event_loop().time()
         if last_asteroid is None or now - last_asteroid >= asteroid_every:
@@ -2420,11 +2424,12 @@ async def run_combo(config):
                 # Run views quietly: they happen in the gap after the Reels
                 # claim without leaving any trace in the logs.
                 await views_cycle(config, all_sessions, quiet=True)
-            skip = load_asteroid_skip()
-            ast_sessions = [sp for sp in get_session_files() if sp.stem not in skip]
-            if ast_sessions and not shutdown_event.is_set():
-                logger.info("Combo: daily Asteroid run")
-                await asteroid_cycle(config, ast_sessions)
+            if COMBO_ASTEROID_ENABLED:
+                skip = load_asteroid_skip()
+                ast_sessions = [sp for sp in get_session_files() if sp.stem not in skip]
+                if ast_sessions and not shutdown_event.is_set():
+                    logger.info("Combo: daily Asteroid run")
+                    await asteroid_cycle(config, ast_sessions)
             last_asteroid = now
 
     async def reels_block():
