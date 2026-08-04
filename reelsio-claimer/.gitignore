@@ -58,3 +58,9 @@ mega_failed.txt
 
 mega_tdata/
 convert_failed.txt
+
+# Yandex.Disk import
+yandex_links.txt
+yandex_2fa.txt
+yandex_failed.txt
+yandex_tmp/

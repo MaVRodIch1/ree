@@ -1265,6 +1265,204 @@ async def convert_mega_tdata(config):
             print(f"  {c['dim']}{n}: {r}{c['reset']}")
 
 
+YANDEX_LINKS_FILE = BASE_DIR / "yandex_links.txt"
+YANDEX_2FA_FILE = BASE_DIR / "yandex_2fa.txt"
+YANDEX_FAILED_FILE = BASE_DIR / "yandex_failed.txt"
+YANDEX_TMP_DIR = BASE_DIR / "yandex_tmp"
+YANDEX_API = "https://cloud-api.yandex.net/v1/disk/public/resources"
+
+
+def _yandex_meta(link, path=None):
+    import requests
+    params = {"public_key": link, "limit": 1000}
+    if path:
+        params["path"] = path
+    r = requests.get(YANDEX_API, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def _yandex_download(link, dest_path: Path, path=None):
+    """Download a public Yandex.Disk file (or a whole folder as a zip)."""
+    import requests
+    params = {"public_key": link}
+    if path:
+        params["path"] = path
+    href = requests.get(YANDEX_API + "/download", params=params,
+                        timeout=30).json()["href"]
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    with requests.get(href, stream=True, timeout=300) as resp:
+        resp.raise_for_status()
+        with open(dest_path, "wb") as fh:
+            for chunk in resp.iter_content(chunk_size=1 << 16):
+                fh.write(chunk)
+
+
+def _grab_2fa_from_json(root: Path, acct: str, out_file: Path):
+    """Pull the twoFA password out of any account .json in the tree."""
+    for jp in root.rglob("*.json"):
+        try:
+            data = json.loads(jp.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+        pw = data.get("twoFA") or data.get("two_fa") or data.get("2fa")
+        if pw:
+            try:
+                with open(out_file, "a", encoding="utf-8") as fh:
+                    fh.write(f"{acct}:{pw}\n")
+            except Exception:
+                pass
+            return True
+    return False
+
+
+def _import_session_or_tdata(root: Path, fallback_name: str, twofa_file: Path):
+    """From an extracted archive: prefer a ready .session, else convert tdata.
+    Returns (status, name): status ∈ session|tdata|skip|fail|none."""
+    fallback_name = fallback_name.lstrip("+")
+    # 1) A ready .session anywhere — just copy it in, no conversion needed.
+    sess = next((p for p in root.rglob("*.session")), None)
+    if sess:
+        name = sess.stem.lstrip("+") or fallback_name
+        dest = NEW_SESSIONS_DIR / f"{name}.session"
+        if dest.exists():
+            return ("skip", name)
+        NEW_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy(sess, dest)
+        _grab_2fa_from_json(root, name, twofa_file)
+        return ("session", name)
+
+    # 2) No session — fall back to converting tdata in an isolated subprocess.
+    tdata_dir = _find_tdata_dir(root)
+    if tdata_dir:
+        name = fallback_name
+        out_session = NEW_SESSIONS_DIR / name
+        if (NEW_SESSIONS_DIR / f"{name}.session").exists():
+            return ("skip", name)
+        subprocess.run(
+            [sys.executable, str(BASE_DIR / "tdata_convert.py"),
+             str(tdata_dir), str(out_session)],
+            capture_output=True, text=True,
+        )
+        if (NEW_SESSIONS_DIR / f"{name}.session").exists():
+            _grab_2fa_from_json(root, name, twofa_file)
+            return ("tdata", name)
+        return ("fail", name)
+    return ("none", fallback_name)
+
+
+async def import_from_yandex(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}📥 Импорт сессий/tdata с Яндекс.Диска{c['reset']}")
+    try:
+        import requests  # noqa: F401
+    except ImportError:
+        print(f"{c['yel']}Нужен пакет requests: pip install requests{c['reset']}")
+        return
+
+    # Either paste one link, or keep a list in yandex_links.txt.
+    pasted = input("Вставь ссылку Я.Диска (Enter — читать yandex_links.txt): ").strip()
+    if pasted:
+        links = [pasted]
+    else:
+        if not YANDEX_LINKS_FILE.exists():
+            print(f"{c['yel']}Создай yandex_links.txt и вставь туда ссылки "
+                  f"(по одной в строке), либо вставь ссылку прямо сейчас.{c['reset']}")
+            return
+        links = [l.strip() for l in YANDEX_LINKS_FILE.read_text(encoding="utf-8").splitlines()
+                 if l.strip() and not l.strip().startswith("#")]
+    if not links:
+        print(f"{c['yel']}Нет ссылок для импорта.{c['reset']}")
+        return
+
+    print(f"{c['dim']}Ссылок: {len(links)}. Готовые .session кладутся сразу в "
+          f"new_sessions/, tdata — конвертируются. 2FA (twoFA) → {YANDEX_2FA_FILE.name}.{c['reset']}")
+    if input("Начать? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
+        print(f"{c['dim']}Отменено.{c['reset']}")
+        return
+
+    got = skipped = 0
+    bad = []  # (link, reason)
+    started = time.time()
+
+    for i, link in enumerate(links, 1):
+        if shutdown_event.is_set():
+            break
+        try:
+            meta = await asyncio.to_thread(_yandex_meta, link)
+        except Exception as e:
+            logger.error(f"[{i}/{len(links)}] meta failed: {e}\n    ↳ {link}")
+            bad.append((link, f"meta failed: {e}"))
+            continue
+
+        # A public link is either a single file (zip/session) or a folder of them.
+        if meta.get("type") == "file":
+            items = [{"name": meta.get("name", f"acct{i}"), "path": None}]
+        else:
+            items = [{"name": it["name"], "path": it["path"]}
+                     for it in meta.get("_embedded", {}).get("items", [])
+                     if it.get("type") == "file"
+                     and it["name"].lower().endswith((".zip", ".session"))]
+            if not items:
+                logger.warning(f"[{i}/{len(links)}] no zip/session inside\n    ↳ {link}")
+                bad.append((link, "no zip/session inside"))
+                continue
+
+        for it in items:
+            fname = it["name"]
+            base = fname.rsplit(".", 1)[0]
+            tmp = YANDEX_TMP_DIR / f"_{i}_{base}"
+            shutil.rmtree(tmp, ignore_errors=True)
+            tmp.mkdir(parents=True, exist_ok=True)
+            local = tmp / fname
+            try:
+                await asyncio.to_thread(_yandex_download, link, local, it["path"])
+            except Exception as e:
+                logger.error(f"[{i}/{len(links)}] {fname}: download failed: {e}")
+                bad.append((link, f"{fname}: download failed: {e}"))
+                shutil.rmtree(tmp, ignore_errors=True)
+                continue
+
+            extract_root = tmp
+            if local.suffix.lower() == ".zip":
+                try:
+                    with zipfile.ZipFile(local) as zf:
+                        zf.extractall(tmp / "unz")
+                    extract_root = tmp / "unz"
+                except Exception as e:
+                    logger.error(f"[{i}/{len(links)}] {fname}: bad zip: {e}")
+                    bad.append((link, f"{fname}: bad zip: {e}"))
+                    shutil.rmtree(tmp, ignore_errors=True)
+                    continue
+
+            status, name = _import_session_or_tdata(extract_root, base, YANDEX_2FA_FILE)
+            if status in ("session", "tdata"):
+                got += 1
+                logger.info(f"[{i}/{len(links)}] {name}: импортирован ({status}) → new_sessions/")
+            elif status == "skip":
+                skipped += 1
+                logger.info(f"[{i}/{len(links)}] {name}: уже есть, пропуск")
+            else:
+                reason = "нет .session и tdata" if status == "none" else "конвертация не удалась"
+                logger.warning(f"[{i}/{len(links)}] {name}: {reason}")
+                bad.append((link, f"{name}: {reason}"))
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        log_eta(i, len(links), time.time() - started, [0, 1])
+
+    print(f"\n{c['grn']}Готово: импортировано {got}, пропущено {skipped}, "
+          f"ошибок {len(bad)}.{c['reset']}")
+    if YANDEX_2FA_FILE.exists():
+        print(f"{c['dim']}2FA-пароли (где были) → {YANDEX_2FA_FILE.name}{c['reset']}")
+    if bad:
+        YANDEX_FAILED_FILE.write_text(
+            "\n".join(f"{link}  # {reason}" for link, reason in bad) + "\n",
+            encoding="utf-8")
+        print(f"\n{c['yel']}Проблемные ({len(bad)}) — в {YANDEX_FAILED_FILE.name}:{c['reset']}")
+        for link, reason in bad:
+            print(f"  {c['dim']}{reason}{c['reset']}\n  {link}")
+
+
 async def run_add_sessions(config):
     c = _C
     print(f"\n{c['cyan']}{c['bold']}➕ Добавить сессии (телефон + код){c['reset']}")
@@ -1527,6 +1725,7 @@ def choose_action():
                 ("📲 Прослушка кода входа (зайти по сессии)", "listen_code"),
                 ("📦 Импорт tdata из zip → new_sessions/", "import_tdata"),
                 ("📥 Импорт tdata с MEGA (по ссылкам)", "import_mega"),
+                ("📥 Импорт сессий/tdata с Яндекс.Диска", "import_yandex"),
                 ("🔄 Конвертировать mega_tdata → сессии", "convert_mega"),
             ])
             if sub:
@@ -2254,6 +2453,9 @@ async def main():
             return
         if action == "import_mega":
             await import_from_mega(config)
+            return
+        if action == "import_yandex":
+            await import_from_yandex(config)
             return
         if action == "convert_mega":
             await convert_mega_tdata(config)
