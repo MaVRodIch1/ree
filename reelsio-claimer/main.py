@@ -800,11 +800,17 @@ async def warm_cycle(config, set_avatar, set_name, set_username):
 
 # ── Channel post views ───────────────────────────────────────────────────────
 
-async def view_channel_posts(client, account_label, channel, hours=24):
+async def view_channel_posts(client, account_label, channel, hours=24, quiet=False):
     alog = logging.getLogger(f"reelsio-claimer.{account_label}")
     alog.handlers = logger.handlers
     alog.propagate = False
     alog.setLevel(logging.INFO)
+
+    def log(level, msg):
+        # quiet mode → drop to debug so nothing about this channel shows in logs
+        if quiet:
+            return
+        getattr(alog, level)(msg)
 
     entity = await client.get_entity(channel)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -816,7 +822,7 @@ async def view_channel_posts(client, account_label, channel, hours=24):
         ids.append(msg.id)
 
     if not ids:
-        alog.info(f"@{channel}: no posts in the last {hours}h")
+        log("info", f"@{channel}: no posts in the last {hours}h")
         return 0
 
     try:
@@ -824,18 +830,24 @@ async def view_channel_posts(client, account_label, channel, hours=24):
             peer=entity, id=ids, increment=True))
         await client(functions.channels.ReadHistoryRequest(
             channel=entity, max_id=max(ids)))
-        alog.info(f"@{channel}: viewed {len(ids)} post(s)")
+        log("info", f"@{channel}: viewed {len(ids)} post(s)")
         return len(ids)
     except errors.FloodWaitError as e:
-        alog.warning(f"FloodWait {e.seconds}s on views")
+        log("warning", f"FloodWait {e.seconds}s on views")
     except Exception as e:
-        alog.error(f"Views failed: {e}")
+        log("error", f"Views failed: {e}")
     return 0
 
 
-async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24):
+async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24, quiet=False):
     api_id, api_hash = config["api_id"], config["api_hash"]
     delay_range = config.get("delay_between_accounts_sec", [5, 30])
+
+    def log(level, msg):
+        # quiet mode → this whole cycle leaves no trace in the logs
+        if quiet:
+            return
+        getattr(logger, level)(msg)
 
     task = f"views:{channel}"
     window = daily_window()
@@ -843,13 +855,13 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24):
     sessions = [sp for sp in sessions
                 if sp.stem not in done and sp.stem not in BUSY_SESSIONS]
     if done:
-        logger.info(f"Views: {len(done)} already done today, {len(sessions)} left")
+        log("info", f"Views: {len(done)} already done today, {len(sessions)} left")
     if not sessions:
-        logger.info(f"Views @{channel}: already done for today")
+        log("info", f"Views @{channel}: already done for today")
         return
 
     total = len(sessions)
-    logger.info(f"Views @{channel}: {total} account(s)")
+    log("info", f"Views @{channel}: {total} account(s)")
     started = time.time()
     alive = dead = 0
 
@@ -861,29 +873,30 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24):
         try:
             await client.connect()
             if not await client.is_user_authorized():
-                logger.warning(f"[{label}] Not authorized, skipping")
+                log("warning", f"[{label}] Not authorized, skipping")
                 dead += 1
                 progress_mark(task, window, label)
                 continue
             alive += 1
-            await view_channel_posts(client, label, channel, hours)
+            await view_channel_posts(client, label, channel, hours, quiet=quiet)
             progress_mark(task, window, label)
         except Exception as e:
-            logger.error(f"[{label}] error: {e}")
+            log("error", f"[{label}] error: {e}")
         finally:
             try:
                 await client.disconnect()
             except Exception:
                 pass
 
-        log_eta(i, total, time.time() - started, delay_range)
+        if not quiet:
+            log_eta(i, total, time.time() - started, delay_range)
 
         if not shutdown_event.is_set() and session_path != sessions[-1]:
             delay = random.uniform(*delay_range)
-            logger.info(f"Waiting {delay:.1f}s before next account...")
+            log("info", f"Waiting {delay:.1f}s before next account...")
             await asyncio.sleep(delay)
 
-    logger.info(f"Views cycle complete — сессий живо: {alive}/{alive + dead}")
+    log("info", f"Views cycle complete — сессий живо: {alive}/{alive + dead}")
 
 
 async def run_views(config):
@@ -2374,7 +2387,7 @@ async def run_combo(config):
         return
 
     first_task = prompt_menu("С чего начинать каждый цикл?", [
-        (f"👁 Сначала просмотры @{VIEWS_CHANNEL} (потом Рилс)", "views"),
+        ("👁 Сначала просмотры канала (потом Рилс)", "views"),
         ("🎡 Сначала круг Рилс (потом просмотры)", "reels"),
     ], back=False)
     if first_task is None:
@@ -2402,14 +2415,15 @@ async def run_combo(config):
     first_cycle = True
 
     async def daily_block():
-        # Views of @prosadin, then the daily Asteroid run — gated to once/24h.
+        # Daily channel views (silent) + Asteroid run — gated to once/24h.
         nonlocal last_asteroid
         now = asyncio.get_event_loop().time()
         if last_asteroid is None or now - last_asteroid >= asteroid_every:
             all_sessions = get_session_files()
             if all_sessions:
-                logger.info(f"Combo: daily views of @{VIEWS_CHANNEL}")
-                await views_cycle(config, all_sessions)
+                # Run views quietly: they happen in the gap after the Reels
+                # claim without leaving any trace in the logs.
+                await views_cycle(config, all_sessions, quiet=True)
             skip = load_asteroid_skip()
             ast_sessions = [sp for sp in get_session_files() if sp.stem not in skip]
             if ast_sessions and not shutdown_event.is_set():
