@@ -2444,9 +2444,23 @@ async def run_combo(config):
     if reels_mode is None:
         return
 
-    skip_first_reels = input(
-        "Пропустить первый цикл Рилс (сразу к дневному блоку, для теста)? (y/n) [n]: "
-    ).strip().lower() in ("y", "yes", "да")
+    when = prompt_menu("Когда запустить первый цикл Рилс?", [
+        ("▶️  Сейчас (сразу)", "now"),
+        ("⏱  Через N часов (ввести)", "delay"),
+        ("⏭  Пропустить первый круг (только дневной блок/снайпер)", "skip"),
+    ], back=False)
+    if when is None:
+        return
+
+    skip_first_reels = when == "skip"
+    first_reels_delay = 0.0
+    if when == "delay":
+        raw = input("Через сколько часов запустить первый цикл Рилс? (напр. 2 или 0.5): ").strip()
+        try:
+            first_reels_delay = max(0.0, float(raw.replace(",", "."))) * 3600
+        except ValueError:
+            print(f"{c['yel']}Не понял число — запущу сейчас.{c['reset']}")
+            first_reels_delay = 0.0
 
     want_sniper = input(
         f"Держать снайпер комментариев @{SNIPER_CHANNEL} параллельно? (y/n) [y]: "
@@ -2500,10 +2514,20 @@ async def run_combo(config):
 
     async def reels_block():
         nonlocal first_cycle
-        if first_cycle and skip_first_reels:
-            logger.info("Combo: skipping first Reels cycle (test mode)")
-        else:
-            await run_cycle(config, reels_mode)
+        if first_cycle:
+            if skip_first_reels:
+                logger.info("Combo: skipping first Reels cycle (test mode)")
+                first_cycle = False
+                return
+            if first_reels_delay > 0:
+                logger.info(f"Combo: ждём {fmt_duration(first_reels_delay)} до первого цикла Рилс")
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=first_reels_delay)
+                except asyncio.TimeoutError:
+                    pass
+                if shutdown_event.is_set():
+                    return
+        await run_cycle(config, reels_mode)
         first_cycle = False
 
     while not shutdown_event.is_set():
