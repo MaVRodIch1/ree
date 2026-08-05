@@ -69,6 +69,27 @@ logging.getLogger("telethon").setLevel(logging.ERROR)
 # Telethon then reconnect-loops forever.
 BUSY_SESSIONS = set()
 
+
+async def acquire_account(label, timeout=120):
+    """Claim exclusive use of one account's session. Returns True once claimed,
+    False on timeout/shutdown. Prevents the Reels cycle and the background
+    views drizzle from opening the same .session at the same time (which would
+    trip SQLite 'database is locked' / dropped connections)."""
+    waited = 0.0
+    # In a single event loop the gap between the `while` check and `add` has no
+    # await, so the claim is atomic — no lost race.
+    while label in BUSY_SESSIONS:
+        if shutdown_event.is_set() or waited >= timeout:
+            return False
+        await asyncio.sleep(1)
+        waited += 1
+    BUSY_SESSIONS.add(label)
+    return True
+
+
+def release_account(label):
+    BUSY_SESSIONS.discard(label)
+
 shutdown_event = asyncio.Event()
 
 ZONTIQ_BASE = "https://api.zontiq.io/api/v1"
@@ -84,6 +105,9 @@ COMBO_ASTEROID_ENABLED = False
 
 # Channel whose fresh posts get viewed once a day
 VIEWS_CHANNEL = "prosadin"
+# In combo, channel views are drizzled across the day instead of one batch,
+# so the engagement looks organic rather than a spike of fake views.
+VIEWS_SPREAD_HOURS = 16
 
 # Comment sniper: first paid comment under every new post of a channel
 SNIPER_CHANNEL = "durov_russia"
@@ -369,8 +393,9 @@ async def run_cycle(config: dict, mode: str):
     # Resume: skip accounts already done in this cycle window.
     window = cycle_window(config.get("interval_hours", 6))
     done = progress_done("reels", window)
-    sessions = [sp for sp in all_sessions
-                if sp.stem not in done and sp.stem not in BUSY_SESSIONS]
+    # Don't pre-drop transiently-busy accounts (the background views drizzle may
+    # hold one for a second) — acquire_account handles clashes per account.
+    sessions = [sp for sp in all_sessions if sp.stem not in done]
     if done:
         logger.info(f"Resuming cycle: {len(done)} already done, {len(sessions)} left")
 
@@ -388,6 +413,9 @@ async def run_cycle(config: dict, mode: str):
             break
 
         account_label = session_path.stem
+        # Don't open this session if the background views drizzle holds it.
+        if not await acquire_account(account_label):
+            continue
         client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
 
         try:
@@ -408,6 +436,7 @@ async def run_cycle(config: dict, mode: str):
                 await client.disconnect()
             except Exception:
                 pass
+            release_account(account_label)
 
         log_eta(i, total, time.time() - started, delay_range)
 
@@ -842,7 +871,13 @@ async def view_channel_posts(client, account_label, channel, hours=24, quiet=Fal
     return 0
 
 
-async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24, quiet=False):
+async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24, quiet=False,
+                      spread_seconds=None):
+    """View recent posts of `channel` across accounts.
+    spread_seconds: if set, drizzle the accounts evenly over that many seconds
+    (with jitter) so the views look organic instead of one batch. In that mode
+    each account is claimed via acquire_account so it never clashes with the
+    Reels cycle running on the same session."""
     api_id, api_hash = config["api_id"], config["api_hash"]
     delay_range = config.get("delay_between_accounts_sec", [5, 30])
 
@@ -855,8 +890,10 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24, quiet=F
     task = f"views:{channel}"
     window = daily_window()
     done = progress_done(task, window)
-    sessions = [sp for sp in sessions
-                if sp.stem not in done and sp.stem not in BUSY_SESSIONS]
+    # When spreading we don't pre-drop BUSY accounts — we wait per account and
+    # acquire them, so a momentary clash with Reels just delays, not skips.
+    sessions = [sp for sp in sessions if sp.stem not in done
+                and (spread_seconds is not None or sp.stem not in BUSY_SESSIONS)]
     if done:
         log("info", f"Views: {len(done)} already done today, {len(sessions)} left")
     if not sessions:
@@ -865,6 +902,8 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24, quiet=F
 
     total = len(sessions)
     log("info", f"Views @{channel}: {total} account(s)")
+    # Average gap between accounts when drizzling over the day.
+    base_gap = (spread_seconds / total) if spread_seconds and total else None
     started = time.time()
     alive = dead = 0
 
@@ -872,32 +911,48 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24, quiet=F
         if shutdown_event.is_set():
             break
         label = session_path.stem
-        client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
-        try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                log("warning", f"[{label}] Not authorized, skipping")
-                dead += 1
-                progress_mark(task, window, label)
+
+        if spread_seconds is not None:
+            # Wait our turn on this session; skip if held too long (e.g. sniper).
+            if not await acquire_account(label):
                 continue
-            alive += 1
-            await view_channel_posts(client, label, channel, hours, quiet=quiet)
-            progress_mark(task, window, label)
-        except Exception as e:
-            log("error", f"[{label}] error: {e}")
-        finally:
+        try:
+            client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
             try:
-                await client.disconnect()
-            except Exception:
-                pass
+                await client.connect()
+                if not await client.is_user_authorized():
+                    log("warning", f"[{label}] Not authorized, skipping")
+                    dead += 1
+                    progress_mark(task, window, label)
+                    continue
+                alive += 1
+                await view_channel_posts(client, label, channel, hours, quiet=quiet)
+                progress_mark(task, window, label)
+            except Exception as e:
+                log("error", f"[{label}] error: {e}")
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+        finally:
+            if spread_seconds is not None:
+                release_account(label)
 
         if not quiet:
             log_eta(i, total, time.time() - started, delay_range)
 
         if not shutdown_event.is_set() and session_path != sessions[-1]:
-            delay = random.uniform(*delay_range)
+            if base_gap is not None:
+                # Jittered gap around the average, so timing isn't uniform.
+                delay = random.uniform(0.4 * base_gap, 1.6 * base_gap)
+            else:
+                delay = random.uniform(*delay_range)
             log("info", f"Waiting {delay:.1f}s before next account...")
-            await asyncio.sleep(delay)
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
 
     log("info", f"Views cycle complete — сессий живо: {alive}/{alive + dead}")
 
@@ -2389,9 +2444,6 @@ async def run_combo(config):
     if reels_mode is None:
         return
 
-    # Each cycle runs Reels first, then the daily (silent views).
-    first_task = "reels"
-
     skip_first_reels = input(
         "Пропустить первый цикл Рилс (сразу к дневному блоку, для теста)? (y/n) [n]: "
     ).strip().lower() in ("y", "yes", "да")
@@ -2409,30 +2461,41 @@ async def run_combo(config):
 
     interval_hours = config.get("interval_hours", 6)
     random_delay_minutes = config.get("random_delay_minutes", 30)
-    asteroid_every = 24 * 3600  # seconds
-    last_asteroid = None  # None → run on the very first cycle
+    day_seconds = 24 * 3600
+    last_views = None       # monotonic time of the last views drizzle start
+    last_asteroid = None
+    asteroid_every = 24 * 3600
     first_cycle = True
+    views_task = None       # background drizzle task
 
-    async def daily_block():
-        # Daily channel views (silent). Asteroid run is gated off for now
-        # (COMBO_ASTEROID_ENABLED) after the project's anti-bot warning.
-        nonlocal last_asteroid
+    async def maybe_start_daily_views():
+        # Once per 24h, kick off a background drizzle of channel views spread
+        # across the day (organic, not a batch). Runs concurrently with Reels;
+        # per-account locking keeps them from clashing on the same session.
+        nonlocal last_views, views_task
+        if views_task and not views_task.done():
+            return  # yesterday's drizzle is still going — don't stack a new one
         now = asyncio.get_event_loop().time()
-        if last_asteroid is None or now - last_asteroid >= asteroid_every:
+        if last_views is None or now - last_views >= day_seconds:
             all_sessions = get_session_files()
             if all_sessions:
-                # Run views quietly: they happen in the gap after the Reels
-                # claim. A neutral marker (no channel name) just confirms the
-                # daily block ran, so it isn't invisible in the logs.
-                t0 = time.time()
-                await views_cycle(config, all_sessions, quiet=True)
-                logger.info(f"Combo: дневной блок выполнен за {fmt_duration(time.time() - t0)}")
-            if COMBO_ASTEROID_ENABLED:
-                skip = load_asteroid_skip()
-                ast_sessions = [sp for sp in get_session_files() if sp.stem not in skip]
-                if ast_sessions and not shutdown_event.is_set():
-                    logger.info("Combo: daily Asteroid run")
-                    await asteroid_cycle(config, ast_sessions)
+                views_task = asyncio.create_task(views_cycle(
+                    config, all_sessions, quiet=True,
+                    spread_seconds=VIEWS_SPREAD_HOURS * 3600))
+                logger.info(f"Combo: дневной блок запущен (растянут на ~{VIEWS_SPREAD_HOURS}ч)")
+            last_views = now
+
+    async def maybe_run_asteroids():
+        nonlocal last_asteroid
+        if not COMBO_ASTEROID_ENABLED:
+            return
+        now = asyncio.get_event_loop().time()
+        if last_asteroid is None or now - last_asteroid >= asteroid_every:
+            skip = load_asteroid_skip()
+            ast_sessions = [sp for sp in get_session_files() if sp.stem not in skip]
+            if ast_sessions and not shutdown_event.is_set():
+                logger.info("Combo: daily Asteroid run")
+                await asteroid_cycle(config, ast_sessions)
             last_asteroid = now
 
     async def reels_block():
@@ -2444,13 +2507,14 @@ async def run_combo(config):
         first_cycle = False
 
     while not shutdown_event.is_set():
-        # Run the two blocks in the order the user picked at startup.
-        blocks = [daily_block, reels_block] if first_task == "views" \
-            else [reels_block, daily_block]
-        for block in blocks:
-            if shutdown_event.is_set():
-                break
-            await block()
+        # Start/refresh the day-long background views, then run the Reels cycle.
+        await maybe_start_daily_views()
+        if shutdown_event.is_set():
+            break
+        await reels_block()
+        if shutdown_event.is_set():
+            break
+        await maybe_run_asteroids()
         if shutdown_event.is_set():
             break
 
@@ -2464,6 +2528,8 @@ async def run_combo(config):
 
     if sniper:
         sniper.cancel()
+    if views_task:
+        views_task.cancel()
     logger.info("Combo stopped")
 
 
