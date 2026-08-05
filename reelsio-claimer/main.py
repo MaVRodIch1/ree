@@ -2422,8 +2422,11 @@ async def run_combo(config):
             all_sessions = get_session_files()
             if all_sessions:
                 # Run views quietly: they happen in the gap after the Reels
-                # claim without leaving any trace in the logs.
+                # claim. A neutral marker (no channel name) just confirms the
+                # daily block ran, so it isn't invisible in the logs.
+                t0 = time.time()
                 await views_cycle(config, all_sessions, quiet=True)
+                logger.info(f"Combo: дневной блок выполнен за {fmt_duration(time.time() - t0)}")
             if COMBO_ASTEROID_ENABLED:
                 skip = load_asteroid_skip()
                 ast_sessions = [sp for sp in get_session_files() if sp.stem not in skip]
