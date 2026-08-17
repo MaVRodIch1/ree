@@ -108,6 +108,9 @@ VIEWS_CHANNEL = "prosadin"
 # In combo, channel views are drizzled across the day instead of one batch,
 # so the engagement looks organic rather than a spike of fake views.
 VIEWS_SPREAD_HOURS = 16
+# How far back to read channel posts — 48h so a post from the previous day is
+# still picked up even if a daily run was missed or interrupted.
+VIEWS_LOOKBACK_HOURS = 48
 
 # Comment sniper: first paid comment under every new post of a channel
 SNIPER_CHANNEL = "durov_russia"
@@ -2495,6 +2498,7 @@ async def run_combo(config):
             if all_sessions:
                 views_task = asyncio.create_task(views_cycle(
                     config, all_sessions, quiet=True,
+                    hours=VIEWS_LOOKBACK_HOURS,
                     spread_seconds=VIEWS_SPREAD_HOURS * 3600))
                 logger.info(f"Combo: дневной блок запущен (растянут на ~{VIEWS_SPREAD_HOURS}ч)")
             last_views = now
