@@ -63,6 +63,9 @@ convert_failed.txt
 wallets.json
 wallets_backup.txt
 
+# Six Seven token-drop log
+sixseven_drops.txt
+
 # Yandex.Disk import
 yandex_links.txt
 yandex_2fa.txt

@@ -99,6 +99,7 @@ SPLIT_API_BASE = "https://api.split.tg"
 ASTEROID_BOT = "AsteroidShiba_app_bot"
 SIXSEVEN_BOT = "Sixsevenclub_bot"      # @Sixsevenclub_bot — fishing mini app
 SIXSEVEN_CHANNEL = "club67"            # subscribe source for a free attempt
+SIXSEVEN_DROPS_FILE = BASE_DIR / "sixseven_drops.txt"  # accounts that caught 67/TON
 ASTEROID_REF = "6128719325"
 ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
 # Temporarily disabled in combo after an anti-bot warning from the project.
@@ -2014,7 +2015,7 @@ async def sixseven_fish_account(client, label, quiet=False):
         d = {"onboarded_now": False, "terms_accepted_now": False,
              "wallet_bound_now": False, "wallet_address": None, "bonus": None,
              "rewarded": None, "free": 0, "premium": 0, "resets_at": None,
-             "casts": 0, "points": 0, "fish": [], "cast_errors": []}
+             "casts": 0, "points": 0, "fish": [], "specials": [], "cast_errors": []}
         cl = sixseven.SixSeven(init_data)
         cl.auth()
         try:
@@ -2076,8 +2077,20 @@ async def sixseven_fish_account(client, label, quiet=False):
                 d["cast_errors"].append(f"no-catch: {str(r)[:120]}")
                 break
             d["casts"] += 1
-            d["points"] += int(r.get("reward", {}).get("amount", 0) or 0)
-            d["fish"].append(r.get("species", {}).get("code", "?"))
+            rw = r.get("reward", {})
+            sp = r.get("species", {})
+            kind = (rw.get("kind") or "points").lower()
+            if kind == "points":
+                d["points"] += int(rw.get("amount", 0) or 0)
+            else:
+                # Non-points reward = a token drop ($SIXSEVEN / TON etc.)
+                d["specials"].append({
+                    "kind": kind,
+                    "amount": rw.get("amount_human") or rw.get("amount"),
+                    "species": sp.get("code"),
+                    "rarity": r.get("rarity"),
+                })
+            d["fish"].append(sp.get("code", "?"))
             att = r.get("attempts", {})
             if int(att.get("free", 0)) + int(att.get("premium", 0)) <= 0:
                 break
@@ -2097,9 +2110,12 @@ async def sixseven_fish_account(client, label, quiet=False):
                       f"({', '.join(d['fish'])})")
         else:
             slog.info("Six Seven: рыбу не ловил (0 попыток)")
+        for sp in d["specials"]:
+            slog.info(f"Six Seven: 💰 ДРОП {sp['kind'].upper()} {sp['amount']} "
+                      f"({sp['species']}, {sp['rarity']})")
         for err in d["cast_errors"]:
             slog.warning(f"Six Seven: {err}")
-    return d["casts"], d["points"], None
+    return d["casts"], d["points"], d["specials"]
 
 
 async def sixseven_cycle(config, sessions, quiet=False, pause_event=None):
@@ -2122,6 +2138,7 @@ async def sixseven_cycle(config, sessions, quiet=False, pause_event=None):
     log("info", f"Six Seven: рыбалка по {total} аккаунтам")
     started = time.time()
     alive = dead = tot_casts = tot_points = 0
+    drops = {}  # label -> list of special (token 67 / TON) drops
 
     for i, session_path in enumerate(sessions, 1):
         if shutdown_event.is_set():
@@ -2141,9 +2158,11 @@ async def sixseven_cycle(config, sessions, quiet=False, pause_event=None):
                     dead += 1
                     continue
                 alive += 1
-                casts, points, _ = await sixseven_fish_account(client, label, quiet=quiet)
+                casts, points, specials = await sixseven_fish_account(client, label, quiet=quiet)
                 tot_casts += casts
                 tot_points += points
+                if specials:
+                    drops[label] = specials
             except Exception as e:
                 log("error", f"[{label}] Six Seven error: {e}")
             finally:
@@ -2167,7 +2186,27 @@ async def sixseven_cycle(config, sessions, quiet=False, pause_event=None):
 
     log("info", f"Six Seven: готово — заброшено {tot_casts}, очков {tot_points}; "
                 f"сессий живо {alive}/{alive + dead}")
+    _report_sixseven_drops(drops)
     return tot_casts, tot_points
+
+
+def _report_sixseven_drops(drops: dict):
+    """Log and persist the accounts that caught a token (67 / TON) drop."""
+    if not drops:
+        logger.info("Six Seven: токен-дропов (67/TON) не было в этот заход")
+        return
+    logger.info(f"Six Seven: 💰 аккаунты с дропом токена (67/TON): {len(drops)}")
+    lines = [f"# {datetime.now(timezone.utc).isoformat()} — token drops"]
+    for label, specials in drops.items():
+        parts = ", ".join(f"{s['kind']} {s['amount']}" for s in specials)
+        logger.info(f"  💰 {label}: {parts}")
+        lines.append(f"{label}: {parts}")
+    try:
+        with open(SIXSEVEN_DROPS_FILE, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        logger.info(f"Six Seven: список сохранён в {SIXSEVEN_DROPS_FILE.name}")
+    except Exception:
+        pass
 
 
 async def run_sixseven(config):
@@ -2847,8 +2886,29 @@ async def run_combo(config):
             reels_active.clear()
         first_cycle = False
 
+    async def sixseven_night():
+        # Fish once per UTC day, but only during Golden Hours (00–08 UTC) for
+        # the higher legendary/golden-fish chance. Yields to Reels via pause.
+        last_day = None
+        while not shutdown_event.is_set():
+            now = datetime.now(timezone.utc)
+            if 0 <= now.hour < 8 and last_day != now.date():
+                sessions = get_session_files()
+                if sessions:
+                    logger.info("Combo: ночная рыбалка Six Seven (Golden Hours)")
+                    await sixseven_cycle(config, sessions, quiet=True,
+                                         pause_event=reels_active)
+                    last_day = now.date()
+            # check again in ~30 min (cheap; the window is 8h wide)
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=1800)
+            except asyncio.TimeoutError:
+                pass
+
     # Background post monitor — reacts to new posts during rest windows.
     views = asyncio.create_task(views_monitor())
+    # Background night fisher — Six Seven during Golden Hours.
+    fisher = asyncio.create_task(sixseven_night())
 
     while not shutdown_event.is_set():
         await reels_block()
@@ -2869,6 +2929,7 @@ async def run_combo(config):
     if sniper:
         sniper.cancel()
     views.cancel()
+    fisher.cancel()
     logger.info("Combo stopped")
 
 
