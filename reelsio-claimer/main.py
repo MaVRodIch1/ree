@@ -2018,6 +2018,15 @@ async def sixseven_fish_account(client, label, quiet=False):
         bonus = cl.ensure_onboarded()
         st = cl.fishing_state()
         left = sixseven.SixSeven.attempts_left(st)
+        # The attempt grant lags a moment behind onboarding (eventual
+        # consistency) — re-read the state a few times before giving up.
+        if left == 0 and bonus:
+            for _ in range(5):
+                time.sleep(3)
+                st = cl.fishing_state()
+                left = sixseven.SixSeven.attempts_left(st)
+                if left > 0:
+                    break
         casts, points, fish = 0, 0, []
         for _ in range(left):
             try:
