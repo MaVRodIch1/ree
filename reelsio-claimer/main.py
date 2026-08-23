@@ -2011,7 +2011,8 @@ async def sixseven_fish_account(client, label, quiet=False):
     init_data = await get_webapp_init_data(client, SIXSEVEN_BOT)
 
     def _work():
-        d = {"onboarded_now": False, "terms_accepted_now": False, "bonus": None,
+        d = {"onboarded_now": False, "terms_accepted_now": False,
+             "wallet_bound_now": False, "wallet_address": None, "bonus": None,
              "rewarded": None, "free": 0, "premium": 0, "resets_at": None,
              "casts": 0, "points": 0, "fish": [], "cast_errors": []}
         cl = sixseven.SixSeven(init_data)
@@ -2030,6 +2031,26 @@ async def sixseven_fish_account(client, label, quiet=False):
             d["terms_accepted_now"] = cl.ensure_terms()
         except Exception as e:
             d["cast_errors"].append(f"terms: {e}")
+
+        # Fishing requires a bound TON wallet (else casts 409 wallet_required).
+        # Bind this account's generated wallet (create+save it if missing).
+        try:
+            if not cl.wallet_status().get("bound"):
+                import ton_wallets
+                import ton_connect
+                wallets = ton_wallets.load_wallets()
+                w = wallets.get(label)
+                if not w:
+                    wallets, _ = ton_wallets.generate_for_accounts([label])
+                    w = wallets[label]
+                payload = cl.proof_payload()
+                mat = ton_connect.wallet_material(w["mnemonic"], w.get("version", "v4r2"))
+                proof = ton_connect.build_ton_proof(mat, "prod.6sixseven7.club", payload)
+                res = cl.bind_wallet(mat["address_raw"], mat["public_key"], proof)
+                d["wallet_bound_now"] = bool(res.get("bound"))
+                d["wallet_address"] = res.get("address_friendly")
+        except Exception as e:
+            d["cast_errors"].append(f"wallet_bind: {e}")
 
         st = cl.fishing_state()
         left = sixseven.SixSeven.attempts_left(st)
@@ -2067,6 +2088,8 @@ async def sixseven_fish_account(client, label, quiet=False):
         if d["onboarded_now"]:
             slog.info(f"Six Seven: онбординг пройден, бонус "
                       f"{(d['bonus'] or {}).get('bonus_amount', '?')}")
+        if d["wallet_bound_now"]:
+            slog.info(f"Six Seven: кошелёк привязан {d['wallet_address']}")
         slog.info(f"Six Seven: попытки free={d['free']} premium={d['premium']} "
                   f"(rewarded={d['rewarded']}, сброс {d['resets_at']})")
         if d["casts"]:

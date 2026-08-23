@@ -129,12 +129,20 @@ class SixSeven:
         return self._get(BALANCE_PATH).get("data", {})
 
     def cast(self):
-        """Do one fishing cast (spends one attempt). Returns the catch data."""
-        return self._post(CAST_PATH, {}).get("data", {})
+        """Do one fishing cast (spends one attempt). The client generates the
+        cast_id (idempotency key). Requires a bound wallet. Returns catch data."""
+        return self._post(CAST_PATH, {"cast_id": str(uuid.uuid4())}).get("data", {})
 
     @staticmethod
     def attempts_left(state: dict) -> int:
         return int(state.get("free_attempts", 0)) + int(state.get("premium_attempts", 0))
+
+    def proof_payload(self) -> str:
+        """Get the ton_proof challenge nonce the backend expects (POST)."""
+        return self._post("/wallet/proof-payload", {}).get("data", {}).get("payload")
+
+    def wallet_status(self) -> dict:
+        return self._get("/wallet").get("data", {})
 
     def bind_wallet(self, address_raw: str, public_key_hex: str, proof: dict,
                     network: str = "-239", wallet_app: str = "tonkeeper"):
