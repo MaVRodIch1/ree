@@ -97,6 +97,8 @@ SPLIT_API_BASE = "https://api.split.tg"
 
 # Asteroid Shiba farming
 ASTEROID_BOT = "AsteroidShiba_app_bot"
+SIXSEVEN_BOT = "Sixsevenclub_bot"      # @Sixsevenclub_bot — fishing mini app
+SIXSEVEN_CHANNEL = "club67"            # subscribe source for a free attempt
 ASTEROID_REF = "6128719325"
 ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
 # Temporarily disabled in combo after an anti-bot warning from the project.
@@ -1793,6 +1795,7 @@ def choose_action():
             sub = prompt_menu("Фарм ботов — выбери проект:", [
                 ("🎡 Рилс (Reels.io)", "reels"),
                 ("🪐 Asteroid Shiba", "asteroid"),
+                ("🎣 Six Seven Club (рыбалка)", "sixseven"),
                 ("🔁 Комбо: Рилс 6ч + Астероиды 24ч", "combo"),
             ])
             if sub:
@@ -1993,6 +1996,135 @@ async def multi_pick_sessions(title):
         print(f"{c['yel']}Ничего не выбрано.{c['reset']}")
         return None
     return [files[i - 1] for i in idx]
+
+
+async def sixseven_fish_account(client, label, quiet=False):
+    """Auth to Six Seven for this account and fish every available attempt.
+    Returns (casts, points, err). Runs the sync HTTP client in a thread."""
+    import sixseven
+
+    slog = logging.getLogger(f"reelsio-claimer.{label}")
+    slog.handlers = logger.handlers
+    slog.propagate = False
+    slog.setLevel(logging.INFO if not quiet else logging.WARNING)
+
+    init_data = await get_webapp_init_data(client, SIXSEVEN_BOT)
+
+    def _work():
+        cl = sixseven.SixSeven(init_data)
+        cl.auth()
+        st = cl.fishing_state()
+        left = sixseven.SixSeven.attempts_left(st)
+        casts, points, fish = 0, 0, []
+        for _ in range(left):
+            try:
+                r = cl.cast()
+            except Exception:
+                break
+            if not r.get("caught") and not r.get("cast_id"):
+                break
+            casts += 1
+            rw = r.get("reward", {})
+            points += int(rw.get("amount", 0) or 0)
+            sp = r.get("species", {})
+            fish.append(sp.get("code", "?"))
+            att = r.get("attempts", {})
+            if int(att.get("free", 0)) + int(att.get("premium", 0)) <= 0:
+                break
+        return casts, points, fish, left
+
+    casts, points, fish, left = await asyncio.to_thread(_work)
+    if not quiet:
+        if left == 0:
+            slog.info("Six Seven: попыток нет (0)")
+        else:
+            slog.info(f"Six Seven: заброшено {casts}, поймано {points} очков "
+                      f"({', '.join(fish) if fish else '—'})")
+    return casts, points, None
+
+
+async def sixseven_cycle(config, sessions, quiet=False, pause_event=None):
+    """Fish on every account (using whatever attempts each has)."""
+    api_id, api_hash = config["api_id"], config["api_hash"]
+    delay_range = config.get("delay_between_accounts_sec", [5, 30])
+    use_lock = pause_event is not None
+
+    def log(level, msg):
+        if quiet:
+            return
+        getattr(logger, level)(msg)
+
+    async def wait_while_paused():
+        while pause_event is not None and pause_event.is_set() \
+                and not shutdown_event.is_set():
+            await asyncio.sleep(5)
+
+    total = len(sessions)
+    log("info", f"Six Seven: рыбалка по {total} аккаунтам")
+    started = time.time()
+    alive = dead = tot_casts = tot_points = 0
+
+    for i, session_path in enumerate(sessions, 1):
+        if shutdown_event.is_set():
+            break
+        label = session_path.stem
+        await wait_while_paused()
+        if shutdown_event.is_set():
+            break
+        if use_lock and not await acquire_account(label):
+            continue
+        try:
+            client = TelegramClient(str(session_path.with_suffix("")), int(api_id), str(api_hash))
+            try:
+                await client.connect()
+                if not await client.is_user_authorized():
+                    log("warning", f"[{label}] Not authorized, skipping")
+                    dead += 1
+                    continue
+                alive += 1
+                casts, points, _ = await sixseven_fish_account(client, label, quiet=quiet)
+                tot_casts += casts
+                tot_points += points
+            except Exception as e:
+                log("error", f"[{label}] Six Seven error: {e}")
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+        finally:
+            if use_lock:
+                release_account(label)
+
+        if not quiet:
+            log_eta(i, total, time.time() - started, delay_range)
+        if not shutdown_event.is_set() and session_path != sessions[-1]:
+            delay = random.uniform(*delay_range)
+            log("info", f"Waiting {delay:.1f}s before next account...")
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+
+    log("info", f"Six Seven: готово — заброшено {tot_casts}, очков {tot_points}; "
+                f"сессий живо {alive}/{alive + dead}")
+    return tot_casts, tot_points
+
+
+async def run_sixseven(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}🎣 Six Seven Club — рыбалка{c['reset']}")
+    print(f"{c['dim']}Заходит в @{SIXSEVEN_BOT}, ловит рыбу всеми доступными "
+          f"попытками (сбрасываются раз в сутки).{c['reset']}")
+
+    sessions = await multi_pick_sessions("Six Seven")
+    if not sessions:
+        return
+    if input(f"Запустить рыбалку на {len(sessions)} акк? (yes/n): ").strip().lower() \
+            not in ("yes", "y", "да"):
+        print(f"{c['dim']}Отменено.{c['reset']}")
+        return
+    await sixseven_cycle(config, sessions)
 
 
 async def run_gen_wallets(config):
@@ -2727,6 +2859,9 @@ async def main():
             return
         if action == "asteroid":
             await run_asteroid(config)
+            return
+        if action == "sixseven":
+            await run_sixseven(config)
             return
         if action == "combo":
             await run_combo(config)
