@@ -2011,8 +2011,8 @@ async def sixseven_fish_account(client, label, quiet=False):
     init_data = await get_webapp_init_data(client, SIXSEVEN_BOT)
 
     def _work():
-        d = {"onboarded_now": False, "bonus": None, "rewarded": None,
-             "free": 0, "premium": 0, "resets_at": None,
+        d = {"onboarded_now": False, "terms_accepted_now": False, "bonus": None,
+             "rewarded": None, "free": 0, "premium": 0, "resets_at": None,
              "casts": 0, "points": 0, "fish": [], "cast_errors": []}
         cl = sixseven.SixSeven(init_data)
         cl.auth()
@@ -2024,6 +2024,12 @@ async def sixseven_fish_account(client, label, quiet=False):
                 d["onboarded_now"] = True
         except Exception as e:
             d["cast_errors"].append(f"onboarding: {e}")
+
+        # Casting is rejected (400) until Terms of Use are accepted.
+        try:
+            d["terms_accepted_now"] = cl.ensure_terms()
+        except Exception as e:
+            d["cast_errors"].append(f"terms: {e}")
 
         st = cl.fishing_state()
         left = sixseven.SixSeven.attempts_left(st)

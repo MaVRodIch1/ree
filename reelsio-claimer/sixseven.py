@@ -91,6 +91,21 @@ class SixSeven:
         r.raise_for_status()
         return r.json() if r.text else {}
 
+    def profile(self):
+        return self._get("/user/profile").get("data", {})
+
+    def accept_terms(self):
+        """Accept the Terms of Use — REQUIRED before /fishing/casts works."""
+        return self._post("/terms/accept", {"payload": "accepted"})
+
+    def ensure_terms(self):
+        """Accept terms once if not already accepted. Returns True if it just
+        accepted them."""
+        if not self.profile().get("terms_accepted"):
+            self.accept_terms()
+            return True
+        return False
+
     def onboarding_status(self):
         return self._get("/onboarding/status").get("data", {})
 
