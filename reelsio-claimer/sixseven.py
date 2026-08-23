@@ -27,9 +27,8 @@ DEFAULT_FINGERPRINT = {
     "version": "9.6",
 }
 
-# ⚠️ FILL FROM CAPTURE: the URL of the request whose body is {fingerprint, initData}.
-# Very likely one of these — confirm from DevTools:
-AUTH_PATH = "/auth"           # e.g. "/auth", "/auth/telegram", "/session"
+# Confirmed: POST /auth {fingerprint, initData} -> {"data":{"token":...},"success":true}
+AUTH_PATH = "/auth"
 # ⚠️ FILL FROM CAPTURE: the fishing action that returns {"cast_id": "..."}.
 CAST_PATH = "/fishing/cast"   # confirm method (POST) + body
 
@@ -71,9 +70,9 @@ class SixSeven:
         )
         r.raise_for_status()
         data = r.json()
-        # token may come as accessToken / token / access_token, or a cookie.
-        self.token = (data.get("accessToken") or data.get("token")
-                      or data.get("access_token")
+        # Confirmed shape: {"data": {"token": "..."}, "success": true}
+        self.token = ((data.get("data") or {}).get("token")
+                      or data.get("token")
                       or self.s.cookies.get("accessToken"))
         if not self.token:
             raise RuntimeError(f"auth: no token in response: {data}")
