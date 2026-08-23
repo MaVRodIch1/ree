@@ -91,6 +91,22 @@ class SixSeven:
         r.raise_for_status()
         return r.json() if r.text else {}
 
+    def onboarding_status(self):
+        return self._get("/onboarding/status").get("data", {})
+
+    def onboarding_complete(self):
+        """Finish onboarding — grants the welcome bonus AND the first free
+        fishing attempt. Returns {dice_value, sevens_value, bonus_amount}."""
+        return self._post("/onboarding/complete", {}).get("data", {})
+
+    def ensure_onboarded(self):
+        """Complete onboarding once (fresh accounts start with 0 attempts until
+        onboarded). Returns the bonus dict if it just onboarded, else None."""
+        st = self.onboarding_status()
+        if not st.get("rewarded"):
+            return self.onboarding_complete()
+        return None
+
     def fishing_state(self):
         return self._get(STATE_PATH).get("data", {})
 

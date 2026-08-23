@@ -2013,6 +2013,9 @@ async def sixseven_fish_account(client, label, quiet=False):
     def _work():
         cl = sixseven.SixSeven(init_data)
         cl.auth()
+        # Fresh accounts start with 0 attempts until onboarding is completed;
+        # that grants the welcome bonus and the first free fishing attempt.
+        bonus = cl.ensure_onboarded()
         st = cl.fishing_state()
         left = sixseven.SixSeven.attempts_left(st)
         casts, points, fish = 0, 0, []
@@ -2031,11 +2034,13 @@ async def sixseven_fish_account(client, label, quiet=False):
             att = r.get("attempts", {})
             if int(att.get("free", 0)) + int(att.get("premium", 0)) <= 0:
                 break
-        return casts, points, fish, left
+        return casts, points, fish, left, bonus
 
-    casts, points, fish, left = await asyncio.to_thread(_work)
+    casts, points, fish, left, bonus = await asyncio.to_thread(_work)
     if not quiet:
-        if left == 0:
+        if bonus:
+            slog.info(f"Six Seven: онбординг пройден, бонус {bonus.get('bonus_amount', '?')}")
+        if left == 0 and not bonus:
             slog.info("Six Seven: попыток нет (0)")
         else:
             slog.info(f"Six Seven: заброшено {casts}, поймано {points} очков "
