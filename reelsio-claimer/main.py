@@ -1801,6 +1801,7 @@ def choose_action():
             sub = prompt_menu("Пополняшки и прогрев:", [
                 ("✍️  Написать боту", "write_bot"),
                 ("⭐ Пополнить старс", "topup_stars"),
+                ("💎 TON-кошельки: сгенерить под аккаунты", "gen_wallets"),
                 ("👁 Просмотры постов канала", "views"),
                 ("🎯 Снайпер комментариев (первый коммент)", "sniper"),
             ])
@@ -1992,6 +1993,62 @@ async def multi_pick_sessions(title):
         print(f"{c['yel']}Ничего не выбрано.{c['reset']}")
         return None
     return [files[i - 1] for i in idx]
+
+
+async def run_gen_wallets(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}💎 Генерация TON-кошельков под аккаунты{c['reset']}")
+    try:
+        import ton_wallets
+    except Exception as e:
+        print(f"{c['yel']}Нужен пакет tonsdk: pip install tonsdk ({e}){c['reset']}")
+        return
+
+    # A wallet per account. Pick which accounts.
+    folder = prompt_menu("Для каких аккаунтов делать кошельки?", [
+        ("📁 sessions/ (рабочие)", "old"),
+        ("📁 new_sessions/ (новые)", "new"),
+        ("📁 обе папки", "both"),
+    ])
+    if folder is None:
+        return
+    if folder == "old":
+        files = get_session_files(SESSIONS_DIR)
+    elif folder == "new":
+        files = get_session_files(NEW_SESSIONS_DIR)
+    else:
+        files = get_session_files(SESSIONS_DIR) + get_session_files(NEW_SESSIONS_DIR)
+
+    names = sorted({p.stem for p in files})
+    if not names:
+        print(f"{c['yel']}Нет сессий в выбранной папке.{c['reset']}")
+        return
+
+    existing = ton_wallets.load_wallets()
+    have = sum(1 for n in names if n in existing)
+    todo = len(names) - have
+    print(f"{c['dim']}Аккаунтов: {len(names)}. Уже с кошельком: {have}. "
+          f"Будет создано новых: {todo}.{c['reset']}")
+    print(f"{c['yel']}Сид-фразы (24 слова) — доступ к деньгам. Хранятся ЛОКАЛЬНО в "
+          f"wallets.json и wallets_backup.txt, в гит не попадают. Сделай их бэкап!{c['reset']}")
+    if todo == 0:
+        print(f"{c['grn']}У всех аккаунтов уже есть кошельки — {ton_wallets.WALLETS_FILE.name}.{c['reset']}")
+        return
+    if input("Сгенерировать недостающие? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
+        print(f"{c['dim']}Отменено.{c['reset']}")
+        return
+
+    wallets, created = await asyncio.to_thread(
+        ton_wallets.generate_for_accounts, names, "v4r2", False)
+    print(f"\n{c['grn']}Создано кошельков: {created}. Всего в базе: {len(wallets)}.{c['reset']}")
+    print(f"{c['dim']}Секреты: {ton_wallets.WALLETS_FILE.name} (json) и "
+          f"{ton_wallets.WALLETS_BACKUP.name} (для ручного импорта в Tonkeeper).{c['reset']}")
+    # Show a couple of fresh addresses as a sanity check (no seeds printed).
+    shown = 0
+    for n in names:
+        if n in wallets and shown < 3:
+            print(f"  {c['dim']}{n} → {wallets[n]['address']}{c['reset']}")
+            shown += 1
 
 
 async def run_stars(config):
@@ -2664,6 +2721,9 @@ async def main():
             return
         if action == "topup_stars":
             await run_stars(config)
+            return
+        if action == "gen_wallets":
+            await run_gen_wallets(config)
             return
         if action == "asteroid":
             await run_asteroid(config)

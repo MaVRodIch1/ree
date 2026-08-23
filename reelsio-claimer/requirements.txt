@@ -10,3 +10,5 @@ pycryptodome
 #   pip install pyqt5
 opentele
 pyqt5
+# tonsdk — TON wallet generation (24-word seeds, addresses) for Six Seven fishing
+tonsdk
