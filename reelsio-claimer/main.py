@@ -2011,50 +2011,66 @@ async def sixseven_fish_account(client, label, quiet=False):
     init_data = await get_webapp_init_data(client, SIXSEVEN_BOT)
 
     def _work():
+        d = {"onboarded_now": False, "bonus": None, "rewarded": None,
+             "free": 0, "premium": 0, "resets_at": None,
+             "casts": 0, "points": 0, "fish": [], "cast_errors": []}
         cl = sixseven.SixSeven(init_data)
         cl.auth()
-        # Fresh accounts start with 0 attempts until onboarding is completed;
-        # that grants the welcome bonus and the first free fishing attempt.
-        bonus = cl.ensure_onboarded()
+        try:
+            ob = cl.onboarding_status()
+            d["rewarded"] = ob.get("rewarded")
+            if not ob.get("rewarded"):
+                d["bonus"] = cl.onboarding_complete()
+                d["onboarded_now"] = True
+        except Exception as e:
+            d["cast_errors"].append(f"onboarding: {e}")
+
         st = cl.fishing_state()
         left = sixseven.SixSeven.attempts_left(st)
-        # The attempt grant lags a moment behind onboarding (eventual
-        # consistency) — re-read the state a few times before giving up.
-        if left == 0 and bonus:
+        # The attempt grant can lag behind onboarding — re-read a few times.
+        if left == 0 and d["onboarded_now"]:
             for _ in range(5):
                 time.sleep(3)
                 st = cl.fishing_state()
                 left = sixseven.SixSeven.attempts_left(st)
                 if left > 0:
                     break
-        casts, points, fish = 0, 0, []
+        d["free"] = int(st.get("free_attempts", 0))
+        d["premium"] = int(st.get("premium_attempts", 0))
+        d["resets_at"] = st.get("resets_at")
+
         for _ in range(left):
             try:
                 r = cl.cast()
-            except Exception:
+            except Exception as e:
+                d["cast_errors"].append(str(e)[:120])
                 break
             if not r.get("caught") and not r.get("cast_id"):
+                d["cast_errors"].append(f"no-catch: {str(r)[:120]}")
                 break
-            casts += 1
-            rw = r.get("reward", {})
-            points += int(rw.get("amount", 0) or 0)
-            sp = r.get("species", {})
-            fish.append(sp.get("code", "?"))
+            d["casts"] += 1
+            d["points"] += int(r.get("reward", {}).get("amount", 0) or 0)
+            d["fish"].append(r.get("species", {}).get("code", "?"))
             att = r.get("attempts", {})
             if int(att.get("free", 0)) + int(att.get("premium", 0)) <= 0:
                 break
-        return casts, points, fish, left, bonus
+        return d
 
-    casts, points, fish, left, bonus = await asyncio.to_thread(_work)
+    d = await asyncio.to_thread(_work)
     if not quiet:
-        if bonus:
-            slog.info(f"Six Seven: онбординг пройден, бонус {bonus.get('bonus_amount', '?')}")
-        if left == 0 and not bonus:
-            slog.info("Six Seven: попыток нет (0)")
+        if d["onboarded_now"]:
+            slog.info(f"Six Seven: онбординг пройден, бонус "
+                      f"{(d['bonus'] or {}).get('bonus_amount', '?')}")
+        slog.info(f"Six Seven: попытки free={d['free']} premium={d['premium']} "
+                  f"(rewarded={d['rewarded']}, сброс {d['resets_at']})")
+        if d["casts"]:
+            slog.info(f"Six Seven: заброшено {d['casts']}, поймано {d['points']} очков "
+                      f"({', '.join(d['fish'])})")
         else:
-            slog.info(f"Six Seven: заброшено {casts}, поймано {points} очков "
-                      f"({', '.join(fish) if fish else '—'})")
-    return casts, points, None
+            slog.info("Six Seven: рыбу не ловил (0 попыток)")
+        for err in d["cast_errors"]:
+            slog.warning(f"Six Seven: {err}")
+    return d["casts"], d["points"], None
 
 
 async def sixseven_cycle(config, sessions, quiet=False, pause_event=None):
