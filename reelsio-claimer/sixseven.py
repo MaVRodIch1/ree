@@ -27,10 +27,12 @@ DEFAULT_FINGERPRINT = {
     "version": "9.6",
 }
 
-# Confirmed: POST /auth {fingerprint, initData} -> {"data":{"token":...},"success":true}
-AUTH_PATH = "/auth"
-# ⚠️ FILL FROM CAPTURE: the fishing action that returns {"cast_id": "..."}.
-CAST_PATH = "/fishing/cast"   # confirm method (POST) + body
+# Confirmed endpoints (all live-verified):
+AUTH_PATH = "/auth"            # POST {fingerprint, initData} -> {"data":{"token":...}}
+STATE_PATH = "/fishing/state"  # GET -> attempts + sources
+CAST_PATH = "/fishing/casts"   # POST {} -> one catch (spends one attempt)
+BALANCE_PATH = "/user/balance"
+WALLET_BIND_PATH = "/wallet/bind"  # POST {address, network, proof, public_key, wallet_app}
 
 
 def _headers(token: str, session_id: str) -> dict:
@@ -90,11 +92,38 @@ class SixSeven:
         return r.json() if r.text else {}
 
     def fishing_state(self):
-        return self._get("/fishing/state")
+        return self._get(STATE_PATH).get("data", {})
 
     def balance(self):
-        return self._get("/user/balance")
+        return self._get(BALANCE_PATH).get("data", {})
 
-    def cast(self, body: dict | None = None):
-        """Do one fishing cast. Returns {"cast_id": ...} (endpoint TBD)."""
-        return self._post(CAST_PATH, body)
+    def cast(self):
+        """Do one fishing cast (spends one attempt). Returns the catch data."""
+        return self._post(CAST_PATH, {}).get("data", {})
+
+    @staticmethod
+    def attempts_left(state: dict) -> int:
+        return int(state.get("free_attempts", 0)) + int(state.get("premium_attempts", 0))
+
+    def bind_wallet(self, address_raw: str, public_key_hex: str, proof: dict,
+                    network: str = "-239", wallet_app: str = "tonkeeper"):
+        """Bind a generated TON wallet to the account (extra fishing attempts via
+        the `hold` source). `proof` is a TON Connect ton_proof; its domain must be
+        prod.6sixseven7.club. The backend uses `length_bytes` (snake_case)."""
+        dom = proof.get("domain", {})
+        proof_out = {
+            "timestamp": proof["timestamp"],
+            "domain": {
+                "length_bytes": dom.get("lengthBytes", dom.get("length_bytes")),
+                "value": dom.get("value"),
+            },
+            "signature": proof["signature"],
+            "payload": proof["payload"],
+        }
+        return self._post(WALLET_BIND_PATH, {
+            "address": address_raw,
+            "network": network,
+            "proof": proof_out,
+            "public_key": public_key_hex,
+            "wallet_app": wallet_app,
+        }).get("data", {})
