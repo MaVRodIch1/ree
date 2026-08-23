@@ -12,3 +12,5 @@ opentele
 pyqt5
 # tonsdk — TON wallet generation (24-word seeds, addresses) for Six Seven fishing
 tonsdk
+# pynacl — TON Connect ton_proof signing + wallet bind (Six Seven fishing)
+pynacl
