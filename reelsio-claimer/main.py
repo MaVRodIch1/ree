@@ -2184,7 +2184,9 @@ async def sixseven_cycle(config, sessions, quiet=False, pause_event=None):
             except asyncio.TimeoutError:
                 pass
 
-    log("info", f"Six Seven: готово — заброшено {tot_casts}, очков {tot_points}; "
+    # Always show the cycle summary, even in quiet (combo) mode, so it's clear
+    # the night fishing actually ran and what it caught.
+    logger.info(f"Six Seven: готово — заброшено {tot_casts}, очков {tot_points}; "
                 f"сессий живо {alive}/{alive + dead}")
     _report_sixseven_drops(drops)
     return tot_casts, tot_points
