@@ -2,10 +2,11 @@
 tgmrkt.io (@mrkt) client — read the PlayHub/contest leaderboard (Top 50).
 
 Auth: POST /api/v1/auth  {data: <mini-app initData>, photo: <userpic url>, appId: null}
-      -> {"token": "..."} and an access_token cookie (kept in the session).
-Leaderboard (found in the app bundle team-events.queries):
-      GET /api/v1/team-events/active                     -> active events (leaderboardId)
-      GET /api/v1/team-events/ranking?leaderboardId=<id> -> the Top-50 ranking
+      -> {"token": "..."} ; the token goes in the access_token cookie AND the
+      Authorization header (raw, no "Bearer").
+Leaderboard (confirmed live):
+      GET /api/v1/leaderboard/<slug>?offset=0&count=50&get-finished=false
+      -> {top100:[{name,position,points,picture,isMe}], me:{...}, totalPoints, timeRange}
 """
 import requests
 
@@ -16,7 +17,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 def _headers(json_body: bool = False) -> dict:
     h = {
-        "accept": "*/*",
+        "accept": "application/json, text/plain, */*",
         "origin": "https://cdn.tgmrkt.io",
         "referer": "https://cdn.tgmrkt.io/",
         "user-agent": UA,
@@ -24,31 +25,6 @@ def _headers(json_body: bool = False) -> dict:
     if json_body:
         h["content-type"] = "application/json"
     return h
-
-
-def _find_leaderboard_id(active):
-    """Pull a leaderboardId out of the /team-events/active response."""
-    def from_item(it):
-        if isinstance(it, dict):
-            return (it.get("leaderboardId") or it.get("id")
-                    or (it.get("leaderboard") or {}).get("id"))
-        return None
-    if isinstance(active, list):
-        for it in active:
-            lid = from_item(it)
-            if lid:
-                return lid
-    elif isinstance(active, dict):
-        lid = from_item(active)
-        if lid:
-            return lid
-        for key in ("items", "events", "data", "active"):
-            if isinstance(active.get(key), list):
-                for it in active[key]:
-                    lid = from_item(it)
-                    if lid:
-                        return lid
-    return None
 
 
 class TgMrkt:
@@ -64,31 +40,21 @@ class TgMrkt:
                         headers=_headers(json_body=True), timeout=30)
         r.raise_for_status()
         self.token = r.json().get("token")
-        # Auth is cookie-based (the app uses credentials:include). Do NOT set an
-        # Authorization header — a raw token there makes the API 400.
+        # The app sends the raw token in Authorization (no "Bearer") + cookie.
+        if self.token:
+            self.s.headers["Authorization"] = self.token
         return self.token
 
-    def _get(self, path: str, **params):
-        r = self.s.get(BASE + path, headers=_headers(),
-                       params=params or None, timeout=30)
+    def _get(self, path: str, params=None):
+        r = self.s.get(BASE + path, headers=_headers(), params=params, timeout=30)
         if not r.ok:
             raise RuntimeError(f"GET {path} {r.status_code}: {r.text[:200]}")
         return r.json()
 
-    def active_events(self):
-        return self._get("/team-events/active")
+    def leaderboard(self, slug: str, count: int = 50):
+        return self._get(f"/leaderboard/{slug}",
+                         params={"offset": 0, "count": count, "get-finished": "false"})
 
-    def ranking(self, leaderboard_id):
-        return self._get("/team-events/ranking", leaderboardId=leaderboard_id)
-
-    def top_leaderboard(self, leaderboard_id=None):
-        """Return the Top-50 ranking. If leaderboard_id is given, call /ranking
-        directly (works even when /active is NOT_ALLOWED for this account);
-        otherwise discover it via /team-events/active."""
-        lid = leaderboard_id or _find_leaderboard_id(self.active_events())
-        if not lid:
-            raise RuntimeError("no leaderboardId (set TOP_LEADERBOARD_ID)")
-        return self.ranking(lid)
 
 
 
@@ -100,12 +66,11 @@ def _num(x):
 
 
 def extract_rows(payload):
-    """Normalise the ranking payload to [{rank,id,name,score}], tolerant of the
-    exact field names until the real response shape is confirmed."""
+    """Normalise the leaderboard payload to [{rank,id,name,score}]."""
     rows = payload
     if isinstance(payload, dict):
-        for key in ("items", "leaderboard", "list", "data", "ranking",
-                    "top", "results", "users", "members"):
+        for key in ("top100", "top", "items", "leaderboard", "ranking",
+                    "list", "data", "results", "users", "members"):
             if isinstance(payload.get(key), list):
                 rows = payload[key]
                 break
@@ -114,15 +79,13 @@ def extract_rows(payload):
         for i, e in enumerate(rows, 1):
             if not isinstance(e, dict):
                 continue
-            user = e.get("user") if isinstance(e.get("user"), dict) else {}
-            rank = e.get("rank") or e.get("position") or e.get("place") or i
-            uid = (e.get("userId") or e.get("id") or user.get("id")
-                   or e.get("username") or user.get("username"))
-            name = (e.get("username") or e.get("name") or user.get("username")
-                    or user.get("name") or user.get("firstName") or str(uid))
-            score = (e.get("score") or e.get("points") or e.get("gram")
-                     or e.get("amount") or e.get("value") or e.get("balance") or 0)
-            out.append({"rank": rank, "id": str(uid), "name": name, "score": _num(score)})
+            rank = e.get("position") or e.get("rank") or e.get("place") or i
+            name = (e.get("name") or e.get("username") or e.get("userName")
+                    or e.get("title") or "—")
+            score = (e.get("points") or e.get("score") or e.get("gram")
+                     or e.get("amount") or e.get("value") or 0)
+            out.append({"rank": _num(rank), "id": str(name), "name": name,
+                        "score": _num(score)})
     return out
 
 
