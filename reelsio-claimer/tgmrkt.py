@@ -76,17 +76,25 @@ class TgMrkt:
     def pvp_pnl(self, since_iso: str | None = None, max_games: int = 20000):
         """Aggregate real PvP net per player across game history.
         Scans newest→oldest and stops a room once games are older than
-        `since_iso` (the contest start), so it covers the whole event.
-        net = winnings - (TON bets + gift bets), in TON. Returns
-        {name: {net_ton, bet_ton, won_ton, games}}."""
-        rooms = _room_ids(self.game_rooms())
+        `since_iso` (the contest start). Resilient: a failed page returns the
+        partial aggregate instead of raising, so PvP data is never lost wholesale.
+        Returns {name: {net_ton, bet_ton, won_ton, games}}, plus "_scanned"."""
+        try:
+            rooms = _room_ids(self.game_rooms())
+        except Exception:
+            rooms = []
         agg = {}
         seen = 0
         for rid in rooms:
             cursor = ""
             stop_room = False
-            while seen < max_games and not stop_room:
-                data = self.pvp_history(rid, cursor)
+            pages = 0
+            while seen < max_games and not stop_room and pages < 2000:
+                pages += 1
+                try:
+                    data = self.pvp_history(rid, cursor)
+                except Exception:
+                    break  # keep what we have, move to next room
                 games = data.get("pvpGameHistoryDtos") or []
                 if not games:
                     break
@@ -94,7 +102,7 @@ class TgMrkt:
                     if since_iso:
                         cad = g.get("createdAt") or ""
                         if cad and cad < since_iso:
-                            stop_room = True  # older games follow → done here
+                            stop_room = True
                             break
                     seen += 1
                     win = g.get("winner") or {}
@@ -115,9 +123,12 @@ class TgMrkt:
                 cursor = data.get("cursor") or ""
                 if not cursor:
                     break
-        return {nm: {"bet_ton": bet / 1e9, "won_ton": won / 1e9,
-                     "net_ton": (won - bet) / 1e9, "games": n}
-                for nm, (bet, won, n) in agg.items()}
+        out = {nm: {"bet_ton": bet / 1e9, "won_ton": won / 1e9,
+                    "net_ton": (won - bet) / 1e9, "games": n}
+               for nm, (bet, won, n) in agg.items()}
+        out["_scanned"] = seen
+        return out
+
 
 
 

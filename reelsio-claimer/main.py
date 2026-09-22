@@ -2868,6 +2868,11 @@ async def fetch_and_post_top(config, session_path):
 
         payload, pnl = await asyncio.to_thread(_work)
         rows = tgmrkt.extract_rows(payload)
+        scanned = 0
+        if isinstance(pnl, dict):
+            scanned = pnl.pop("_scanned", 0)
+            if not pnl:
+                pnl = None
         history = _load_top_history()
         prev = _scores_about_1h_ago(history)
         stamp = datetime.now(timezone.utc).strftime("%d.%m %H:%M UTC")
@@ -2877,7 +2882,8 @@ async def fetch_and_post_top(config, session_path):
             pnl=pnl, ton_usd=TON_USD)
         await client.send_message(TOP_CHAT_ID, text)
         _save_top_snapshot(history, rows)
-        logger.info(f"Top: лидерборд запощен ({len(rows)} мест)")
+        logger.info(f"Top: лидерборд запощен ({len(rows)} мест; "
+                    f"PvP: {len(pnl) if pnl else 0} игроков / {scanned} игр)")
     except Exception as e:
         logger.error(f"Top: ошибка — {e}")
     finally:
