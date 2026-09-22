@@ -100,6 +100,9 @@ ASTEROID_BOT = "AsteroidShiba_app_bot"
 SIXSEVEN_BOT = "Sixsevenclub_bot"      # @Sixsevenclub_bot — fishing mini app
 SIXSEVEN_CHANNEL = "club67"            # subscribe source for a free attempt
 SIXSEVEN_DROPS_FILE = BASE_DIR / "sixseven_drops.txt"  # accounts that caught 67/TON
+MRKT_BOT = "mrkt"                     # @mrkt — tgmrkt.io mini app
+TOP_CHAT_ID = -1003788532837          # chat to post the leaderboard into
+TOP_INTERVAL_MINUTES = 30             # how often to refresh + post the top
 ASTEROID_REF = "6128719325"
 ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
 # Temporarily disabled in combo after an anti-bot warning from the project.
@@ -1808,6 +1811,7 @@ def choose_action():
                 ("💎 TON-кошельки: сгенерить под аккаунты", "gen_wallets"),
                 ("👁 Просмотры постов канала", "views"),
                 ("🎯 Снайпер комментариев (первый коммент)", "sniper"),
+                ("📊 Слежение за топом @mrkt (постить в чат)", "top_tracker"),
             ])
             if sub:
                 return sub
@@ -2766,6 +2770,79 @@ async def probe_latest_post_id(config, channel, sessions):
     return None
 
 
+def _mrkt_photo(init_data: str):
+    try:
+        user = json.loads(parse_qs(init_data)["user"][0])
+        return user.get("photo_url")
+    except Exception:
+        return None
+
+
+async def fetch_and_post_top(config, session_path):
+    """Open @mrkt on `session_path`, read the Top-50, post it to TOP_CHAT_ID."""
+    import tgmrkt
+    api_id, api_hash = int(config["api_id"]), str(config["api_hash"])
+    label = session_path.stem
+    if not await acquire_account(label):
+        return
+    client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            logger.warning(f"Top: session {label} not authorized")
+            return
+        init_data = await get_webapp_init_data(client, MRKT_BOT)
+        photo = _mrkt_photo(init_data)
+
+        def _work():
+            m = tgmrkt.TgMrkt(init_data, photo)
+            m.auth()
+            return m.leaderboard()
+
+        payload = await asyncio.to_thread(_work)
+        text = tgmrkt.format_top(payload)
+        await client.send_message(TOP_CHAT_ID, text)
+        logger.info("Top: лидерборд запощен в чат")
+    except Exception as e:
+        logger.error(f"Top: ошибка — {e}")
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        release_account(label)
+
+
+async def top_tracker_task(config, session_path, pause_event=None):
+    """Periodically fetch the leaderboard and post it, until shutdown."""
+    logger.info(f"Top: слежение за топом запущено ({session_path.stem}, "
+                f"каждые {TOP_INTERVAL_MINUTES} мин)")
+    while not shutdown_event.is_set():
+        while pause_event is not None and pause_event.is_set() \
+                and not shutdown_event.is_set():
+            await asyncio.sleep(5)
+        await fetch_and_post_top(config, session_path)
+        try:
+            await asyncio.wait_for(shutdown_event.wait(),
+                                   timeout=TOP_INTERVAL_MINUTES * 60)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def run_top_tracker(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}📊 Слежение за топом @{MRKT_BOT}{c['reset']}")
+    print(f"{c['dim']}Одна сессия периодически берёт Топ-50 и постит в чат "
+          f"{TOP_CHAT_ID}.{c['reset']}")
+    session_path = pick_session("Слежение за топом — сессия")
+    if not session_path:
+        return
+    if input("Запустить слежение? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
+        print(f"{c['dim']}Отменено.{c['reset']}")
+        return
+    await top_tracker_task(config, session_path)
+
+
 async def run_combo(config):
     c = _C
     print(f"\n{c['cyan']}{c['bold']}🔁 Комбо: Рилс (каждые 6ч) + просмотры (раз в сутки){c['reset']}")
@@ -2801,6 +2878,15 @@ async def run_combo(config):
     want_sniper = input(
         f"Держать снайпер комментариев @{SNIPER_CHANNEL} параллельно? (y/n) [y]: "
     ).strip().lower() in ("", "y", "yes", "да")
+
+    want_top = input(
+        f"Слежение за топом @{MRKT_BOT} (постить Топ-50 в чат)? (y/n) [n]: "
+    ).strip().lower() in ("y", "yes", "да")
+    top_session = None
+    if want_top:
+        top_session = pick_session("Слежение за топом — сессия")
+        if not top_session:
+            want_top = False
 
     if input("Запустить комбо? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
         print(f"{c['dim']}Отменено.{c['reset']}")
@@ -2911,6 +2997,9 @@ async def run_combo(config):
     views = asyncio.create_task(views_monitor())
     # Background night fisher — Six Seven during Golden Hours.
     fisher = asyncio.create_task(sixseven_night())
+    # Background leaderboard tracker — posts Top-50 to the chat.
+    top = asyncio.create_task(
+        top_tracker_task(config, top_session, pause_event=reels_active)) if want_top else None
 
     while not shutdown_event.is_set():
         await reels_block()
@@ -2932,6 +3021,8 @@ async def run_combo(config):
         sniper.cancel()
     views.cancel()
     fisher.cancel()
+    if top:
+        top.cancel()
     logger.info("Combo stopped")
 
 
@@ -2993,6 +3084,9 @@ async def main():
             return
         if action == "sniper":
             await run_sniper(config)
+            return
+        if action == "top_tracker":
+            await run_top_tracker(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
