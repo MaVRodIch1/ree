@@ -2859,17 +2859,18 @@ async def run_pvp_h2h(config):
 
         m, board = await asyncio.to_thread(_auth_board)
         rows = tgmrkt.extract_rows(board)
-        me_name = (board.get("me") or {}).get("name") if isinstance(board, dict) else None
         top1 = rows[0]["name"] if rows else ""
-        print(f"{c['dim']}Ты: {me_name or '?'}. Топ-1: {top1}.{c['reset']}")
-        opp = input(f"Против кого считать? (Enter — {top1}): ").strip() or top1
-        me_name = input(f"Твой ник в mrkt (Enter — {me_name}): ").strip() or me_name
-        if not me_name or not opp:
+        top2 = rows[1]["name"] if len(rows) > 1 else ""
+        print(f"{c['dim']}Топ-1: {top1} · Топ-2: {top2}. "
+              f"Можно ввести любые ники.{c['reset']}")
+        a = input(f"Игрок A (Enter — {top2}): ").strip() or top2
+        b = input(f"Игрок B (Enter — {top1}): ").strip() or top1
+        if not a or not b:
             print(f"{c['yel']}Нужны оба ника.{c['reset']}")
             return
         since = (board.get("timeRange") or {}).get("startAt") if isinstance(board, dict) else None
-        print(f"{c['dim']}Считаю историю игр… (это может занять минуту){c['reset']}")
-        h = await asyncio.to_thread(m.pvp_head_to_head, me_name, opp, since)
+        print(f"{c['dim']}Считаю историю игр {a} vs {b}… (может занять минуту){c['reset']}")
+        h = await asyncio.to_thread(m.pvp_head_to_head, a, b, since)
         text = _format_h2h(h, TON_USD)
         print(text)
         if input("Отправить это в чат? (y/n) [n]: ").strip().lower() in ("y", "yes", "да"):
@@ -2885,19 +2886,23 @@ async def run_pvp_h2h(config):
 
 
 def _format_h2h(h, ton_usd=0.0):
+    a, b = h["me"], h["opp"]
+
     def usd(t):
         return f" (${round(t * ton_usd):+,})".replace(",", " ") if ton_usd else ""
-    def block(b, title):
-        g = b["games"]
+
+    def block(bk, title):
+        g = bk["games"]
         if not g:
             return f"{title}: совместных игр нет"
-        wr = 100 * b["my_wins"] / g
+        wr = 100 * bk["my_wins"] / g
+        wrb = 100 * bk["opp_wins"] / g
         return (f"{title} — игр: {g}\n"
-                f"  Твои победы: {b['my_wins']} ({wr:.0f}%) · его: {b['opp_wins']} · другие: {b['other_wins']}\n"
-                f"  Ты слил ему: {b['a_to_b_ton']:.1f} TON{usd(b['a_to_b_ton'])}\n"
-                f"  Он слил тебе: {b['b_to_a_ton']:.1f} TON{usd(b['b_to_a_ton'])}\n"
-                f"  Твой нетто в этих играх: {b['my_net_ton']:+.1f} TON{usd(b['my_net_ton'])}")
-    return (f"🎯 PvP: {h['me']} vs {h['opp']}  (просканировано {h['scanned']} игр)\n\n"
+                f"  Победы {a}: {bk['my_wins']} ({wr:.0f}%) · {b}: {bk['opp_wins']} ({wrb:.0f}%) · другие: {bk['other_wins']}\n"
+                f"  {a} слил {b}: {bk['a_to_b_ton']:.1f} TON{usd(bk['a_to_b_ton'])}\n"
+                f"  {b} слил {a}: {bk['b_to_a_ton']:.1f} TON{usd(bk['b_to_a_ton'])}\n"
+                f"  Нетто {a} в этих играх: {bk['my_net_ton']:+.1f} TON{usd(bk['my_net_ton'])}")
+    return (f"🎯 PvP: {a} vs {b}  (просканировано {h['scanned']} игр)\n\n"
             f"{block(h['overall'], '▪️ Все совместные игры')}\n\n"
             f"{block(h['duel'], '⚔️ Только 1-на-1')}")
 
