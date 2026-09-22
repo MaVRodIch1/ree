@@ -51,9 +51,66 @@ class TgMrkt:
             raise RuntimeError(f"GET {path} {r.status_code}: {r.text[:200]}")
         return r.json()
 
+    def _post(self, path: str, body: dict):
+        r = self.s.post(BASE + path, headers=_headers(json_body=True),
+                        json=body, timeout=30)
+        if not r.ok:
+            raise RuntimeError(f"POST {path} {r.status_code}: {r.text[:200]}")
+        return r.json()
+
     def leaderboard(self, slug: str, count: int = 50):
         return self._get(f"/leaderboard/{slug}",
                          params={"offset": 0, "count": count, "get-finished": "false"})
+
+    # ── PvP win/loss (real net in TON) ──────────────────────────────────────
+    def game_rooms(self):
+        return self._get("/pvp/game-rooms")
+
+    def pvp_history(self, game_room_id, cursor="", count=20):
+        return self._post("/pvp/history", {
+            "count": count, "cursor": cursor, "gameRoomId": game_room_id,
+            "lowToHigh": False, "ordering": "FinishTime",
+            "minWinnings": None, "maxWinnings": None,
+        })
+
+    def pvp_pnl(self, max_games: int = 400):
+        """Aggregate real PvP net per player across recent games.
+        net = winnings - (TON bets + gift bets), in TON. Returns
+        {name: {net_ton, bet_ton, won_ton, games}}."""
+        rooms = _room_ids(self.game_rooms())
+        agg = {}
+        seen = 0
+        for rid in rooms:
+            cursor = ""
+            while seen < max_games:
+                data = self.pvp_history(rid, cursor)
+                games = data.get("pvpGameHistoryDtos") or []
+                if not games:
+                    break
+                for g in games:
+                    seen += 1
+                    win = g.get("winner") or {}
+                    pot = g.get("totalWinNanoTONs") or 0
+                    wname = win.get("publicName")
+                    if wname:
+                        agg.setdefault(wname, [0, 0, 0])[1] += pot  # won
+                    for p in g.get("participants") or []:
+                        nm = p.get("publicName")
+                        if not nm:
+                            continue
+                        contrib = (p.get("totalBetNanoTONs") or 0) + (p.get("totalGiftBetsPrice") or 0)
+                        a = agg.setdefault(nm, [0, 0, 0])
+                        a[0] += contrib  # bet
+                        a[2] += 1        # games
+                    if seen >= max_games:
+                        break
+                cursor = data.get("cursor") or ""
+                if not cursor:
+                    break
+        return {nm: {"bet_ton": bet / 1e9, "won_ton": won / 1e9,
+                     "net_ton": (won - bet) / 1e9, "games": n}
+                for nm, (bet, won, n) in agg.items()}
+
 
 
 
@@ -63,6 +120,26 @@ def _num(x):
         return int(float(str(x).replace(" ", "").replace(",", "")))
     except Exception:
         return 0
+
+
+def _room_ids(payload):
+    """Extract game-room ids from /pvp/game-rooms (tolerant of shape)."""
+    rooms = payload
+    if isinstance(payload, dict):
+        for key in ("gameRooms", "rooms", "items", "data", "results"):
+            if isinstance(payload.get(key), list):
+                rooms = payload[key]
+                break
+    ids = []
+    if isinstance(rooms, list):
+        for r in rooms:
+            if isinstance(r, dict):
+                rid = r.get("id") or r.get("gameRoomId") or r.get("roomId")
+                if rid:
+                    ids.append(rid)
+            elif isinstance(r, str):
+                ids.append(r)
+    return ids
 
 
 def extract_rows(payload):
@@ -94,10 +171,12 @@ def _grp(n):
 
 
 def format_leaderboard(rows, prev=None, usd_per_point=0.0,
-                       title="🏆 Топ лидерборда", limit=50) -> str:
-    """Render the leaderboard with an hourly gain (vs `prev` scores by id) and an
-    estimated spend (score * usd_per_point)."""
+                       title="🏆 Топ лидерборда", limit=50,
+                       pnl=None, ton_usd=0.0) -> str:
+    """Render the leaderboard with an hourly gain (vs `prev` by name) and either
+    a real PvP net (from `pnl`, in TON/$) or a rough points-based spend."""
     prev = prev or {}
+    pnl = pnl or {}
     lines = [title]
     for r in rows[:limit]:
         rk = r["rank"] if isinstance(r["rank"], int) else 0
@@ -106,9 +185,20 @@ def format_leaderboard(rows, prev=None, usd_per_point=0.0,
         if r["id"] in prev:
             d = r["score"] - prev[r["id"]]
             delta = f" (+{_grp(d)}/ч)" if d > 0 else (" (0/ч)" if d == 0 else f" ({_grp(d)}/ч)")
-        spend = f" ~${_grp(round(r['score'] * usd_per_point))}" if usd_per_point > 0 else ""
-        lines.append(f"{head} {r['name']} — {_grp(r['score'])}{delta}{spend}")
-    if usd_per_point > 0:
+        tail = ""
+        p = pnl.get(r["name"])
+        if p is not None:
+            net = p["net_ton"]
+            usd = f" (${_grp(round(net * ton_usd))})" if ton_usd else ""
+            sign = "+" if net >= 0 else ""
+            tail = f" | PvP {sign}{net:.1f} TON{usd}"
+        elif usd_per_point > 0:
+            tail = f" ~${_grp(round(r['score'] * usd_per_point))}"
+        lines.append(f"{head} {r['name']} — {_grp(r['score'])}{delta}{tail}")
+    if pnl:
+        lines.append("\n(PvP — реальный нетто по истории игр; +выиграл / −проиграл)")
+    elif usd_per_point > 0:
         lines.append("\n(траты — грубая оценка по очкам)")
     return "\n".join(lines)
+
 

@@ -109,6 +109,10 @@ TOP_HISTORY_FILE = BASE_DIR / "top_history.json"  # score snapshots for hourly d
 TOP_USD_PER_POINT = 800 / 330000
 # The leaderboard slug (from /api/v1/leaderboard/<slug>). Update per contest.
 TOP_LEADERBOARD_SLUG = "playhub_hot_week"
+# PvP win/loss: how many recent games to scan for the net (0 = skip PvP), and
+# the TON→USD rate used to show net in dollars.
+TOP_PVP_MAX_GAMES = 400
+TON_USD = 3.0
 ASTEROID_REF = "6128719325"
 ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
 # Temporarily disabled in combo after an anti-bot warning from the project.
@@ -2849,16 +2853,24 @@ async def fetch_and_post_top(config, session_path):
         def _work():
             m = tgmrkt.TgMrkt(init_data, photo)
             m.auth()
-            return m.leaderboard(TOP_LEADERBOARD_SLUG)
+            board = m.leaderboard(TOP_LEADERBOARD_SLUG)
+            pnl = None
+            if TOP_PVP_MAX_GAMES > 0:
+                try:
+                    pnl = m.pvp_pnl(TOP_PVP_MAX_GAMES)
+                except Exception as e:
+                    logger.warning(f"Top: PvP P&L недоступен — {e}")
+            return board, pnl
 
-        payload = await asyncio.to_thread(_work)
+        payload, pnl = await asyncio.to_thread(_work)
         rows = tgmrkt.extract_rows(payload)
         history = _load_top_history()
         prev = _scores_about_1h_ago(history)
         stamp = datetime.now(timezone.utc).strftime("%d.%m %H:%M UTC")
         text = tgmrkt.format_leaderboard(
             rows, prev, TOP_USD_PER_POINT,
-            title=f"🏆 PlayHub — Топ 50  ({stamp})")
+            title=f"🏆 PlayHub — Топ 50  ({stamp})",
+            pnl=pnl, ton_usd=TON_USD)
         await client.send_message(TOP_CHAT_ID, text)
         _save_top_snapshot(history, rows)
         logger.info(f"Top: лидерборд запощен ({len(rows)} мест)")
