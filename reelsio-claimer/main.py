@@ -102,8 +102,10 @@ SIXSEVEN_CHANNEL = "club67"            # subscribe source for a free attempt
 SIXSEVEN_DROPS_FILE = BASE_DIR / "sixseven_drops.txt"  # accounts that caught 67/TON
 MRKT_BOT = "mrkt"                     # @mrkt — tgmrkt.io mini app
 TOP_CHAT_ID = -1003788532837          # chat to post the leaderboard into
-TOP_INTERVAL_MINUTES = 30             # how often to refresh + post the top
-TOP_HISTORY_FILE = BASE_DIR / "top_history.json"  # score snapshots for hourly deltas
+TOP_INTERVAL_MINUTES = 60             # how often to refresh + post the top
+TOP_HISTORY_FILE = BASE_DIR / "top_history.json"  # score snapshots for deltas
+TOP_DAILY_FILE = BASE_DIR / "top_daily.txt"       # last date the daily recap was posted
+MSK = timezone(timedelta(hours=3))    # Moscow time for display
 # Rough spend calibration: rank #2 (~330k pts) is said to be ~$800 spent.
 # → ~$0.00242 per point. Tweak here to recalibrate.
 TOP_USD_PER_POINT = 800 / 330000
@@ -2814,15 +2816,35 @@ def _load_top_history():
     return []
 
 
-def _scores_about_1h_ago(history):
-    """Return the score map from the snapshot closest to 1h ago (±20min)."""
-    target = time.time() - 3600
-    best, best_gap = None, 1200  # within 20 min
+def _scores_about(history, ago_seconds, tol):
+    """Score map from the snapshot closest to `ago_seconds` ago (within tol)."""
+    target = time.time() - ago_seconds
+    best, best_gap = None, tol
     for snap in history:
         gap = abs(snap.get("t", 0) - target)
         if gap <= best_gap:
             best, best_gap = snap, gap
     return (best or {}).get("scores", {})
+
+
+def _scores_about_1h_ago(history):
+    return _scores_about(history, 3600, 1800)
+
+
+def _format_daily(rows, day_ago, limit=50):
+    """Per-player gain over ~24h, sorted by gain."""
+    items = []
+    for r in rows:
+        if r["id"] in day_ago:
+            items.append((r["score"] - day_ago[r["id"]], r["name"]))
+    if not items:
+        return None
+    items.sort(reverse=True)
+    lines = [f"📅 Прирост за сутки  ({datetime.now(MSK).strftime('%d.%m %H:%M МСК')})"]
+    for i, (d, name) in enumerate(items[:limit], 1):
+        val = f"+{d:,}".replace(",", " ") if d >= 0 else f"{d:,}".replace(",", " ")
+        lines.append(f"{i}. {name}: {val}")
+    return "\n".join(lines)
 
 
 def _save_top_snapshot(history, rows):
@@ -2953,7 +2975,7 @@ async def fetch_and_post_top(config, session_path):
                 pnl = None
         history = _load_top_history()
         prev = _scores_about_1h_ago(history)
-        stamp = datetime.now(timezone.utc).strftime("%d.%m %H:%M UTC")
+        stamp = datetime.now(MSK).strftime("%d.%m %H:%M МСК")
         text = tgmrkt.format_leaderboard(
             rows, prev, TOP_USD_PER_POINT,
             title=f"🏆 PlayHub — Топ 50  ({stamp})",
@@ -2962,6 +2984,21 @@ async def fetch_and_post_top(config, session_path):
         # Second message: top-2 vs top-1 head-to-head.
         if h2h and h2h.get("overall", {}).get("games", 0) > 0:
             await client.send_message(TOP_CHAT_ID, _format_h2h(h2h, TON_USD))
+        # Once a day: a "gained over 24h" recap, sorted by gain.
+        today = datetime.now(MSK).strftime("%Y-%m-%d")
+        last_daily = ""
+        try:
+            last_daily = TOP_DAILY_FILE.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+        if today != last_daily:
+            daily_txt = _format_daily(rows, _scores_about(history, 86400, 7200))
+            if daily_txt:
+                await client.send_message(TOP_CHAT_ID, daily_txt)
+                try:
+                    TOP_DAILY_FILE.write_text(today, encoding="utf-8")
+                except Exception:
+                    pass
         _save_top_snapshot(history, rows)
         logger.info(f"Top: лидерборд запощен ({len(rows)} мест; "
                     f"PvP: {len(pnl) if pnl else 0} игроков / {scanned} игр)")

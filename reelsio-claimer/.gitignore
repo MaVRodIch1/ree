@@ -74,3 +74,6 @@ yandex_links.txt
 yandex_2fa.txt
 yandex_failed.txt
 yandex_tmp/
+
+# Leaderboard daily-recap state
+top_daily.txt
