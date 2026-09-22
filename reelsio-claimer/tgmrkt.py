@@ -73,90 +73,23 @@ class TgMrkt:
             "minWinnings": None, "maxWinnings": None,
         })
 
-    def pvp_pnl(self, since_iso: str | None = None, max_games: int = 20000):
-        """Aggregate real PvP net per player across game history.
-        Scans newest→oldest and stops a room once games are older than
-        `since_iso` (the contest start). Resilient: a failed page returns the
-        partial aggregate instead of raising, so PvP data is never lost wholesale.
-        Returns {name: {net_ton, bet_ton, won_ton, games}}, plus "_scanned"."""
+    def scan_pvp(self, since_iso: str | None = None, h2h_pair=None,
+                 max_games: int = 20000):
+        """Single pass over PvP history (newest→oldest, stops per room once older
+        than since_iso). Always aggregates per-player net; if h2h_pair=(a,b) is
+        given, also aggregates head-to-head for that pair. Resilient to failed
+        pages (returns partial). Returns (pnl_dict, h2h_dict_or_None)."""
         try:
             rooms = _room_ids(self.game_rooms())
         except Exception:
             rooms = []
         agg = {}
         seen = 0
-        for rid in rooms:
-            cursor = ""
-            stop_room = False
-            pages = 0
-            while seen < max_games and not stop_room and pages < 2000:
-                pages += 1
-                try:
-                    data = self.pvp_history(rid, cursor)
-                except Exception:
-                    break  # keep what we have, move to next room
-                games = data.get("pvpGameHistoryDtos") or []
-                if not games:
-                    break
-                for g in games:
-                    if since_iso:
-                        cad = g.get("createdAt") or ""
-                        if cad and cad < since_iso:
-                            stop_room = True
-                            break
-                    seen += 1
-                    win = g.get("winner") or {}
-                    pot = g.get("totalWinNanoTONs") or 0
-                    wname = win.get("publicName")
-                    if wname:
-                        agg.setdefault(wname, [0, 0, 0])[1] += pot  # won
-                    for p in g.get("participants") or []:
-                        nm = p.get("publicName")
-                        if not nm:
-                            continue
-                        contrib = (p.get("totalBetNanoTONs") or 0) + (p.get("totalGiftBetsPrice") or 0)
-                        a = agg.setdefault(nm, [0, 0, 0])
-                        a[0] += contrib  # bet
-                        a[2] += 1        # games
-                    if seen >= max_games:
-                        break
-                cursor = data.get("cursor") or ""
-                if not cursor:
-                    break
-        out = {nm: {"bet_ton": bet / 1e9, "won_ton": won / 1e9,
-                    "net_ton": (won - bet) / 1e9, "games": n}
-               for nm, (bet, won, n) in agg.items()}
-        out["_scanned"] = seen
-        return out
-
-    def pvp_head_to_head(self, me: str, opp: str, since_iso: str | None = None,
-                         max_games: int = 20000):
-        """Head-to-head PvP stats between `me` and `opp` over games where BOTH
-        played. Attributes a loser's stake to the game's winner. Returns TON
-        figures for all shared games and for strictly 1-vs-1 games."""
-        try:
-            rooms = _room_ids(self.game_rooms())
-        except Exception:
-            rooms = []
-
-        def blank():
-            return {"games": 0, "my_wins": 0, "opp_wins": 0, "other_wins": 0,
-                    "a_to_b": 0, "b_to_a": 0, "my_net": 0, "opp_net": 0}
-        overall, duel = blank(), blank()
-        seen = 0
-
-        def account(bucket, winner, pot, my_c, opp_c):
-            bucket["games"] += 1
-            if winner == me:
-                bucket["my_wins"] += 1
-                bucket["b_to_a"] += opp_c
-            elif winner == opp:
-                bucket["opp_wins"] += 1
-                bucket["a_to_b"] += my_c
-            else:
-                bucket["other_wins"] += 1
-            bucket["my_net"] += (pot if winner == me else 0) - my_c
-            bucket["opp_net"] += (pot if winner == opp else 0) - opp_c
+        a = b = None
+        overall = duel = None
+        if h2h_pair:
+            a, b = h2h_pair
+            overall, duel = _blank_h2h(), _blank_h2h()
 
         for rid in rooms:
             cursor, stop_room, pages = "", False, 0
@@ -174,28 +107,47 @@ class TgMrkt:
                         stop_room = True
                         break
                     seen += 1
+                    win = g.get("winner") or {}
+                    wname = win.get("publicName")
+                    pot = g.get("totalWinNanoTONs") or 0
                     parts = {}
                     for p in g.get("participants") or []:
                         nm = p.get("publicName")
-                        if nm:
-                            parts[nm] = (p.get("totalBetNanoTONs") or 0) + (p.get("totalGiftBetsPrice") or 0)
-                    if me in parts and opp in parts:
-                        winner = (g.get("winner") or {}).get("publicName")
-                        pot = g.get("totalWinNanoTONs") or 0
-                        account(overall, winner, pot, parts[me], parts[opp])
+                        if not nm:
+                            continue
+                        contrib = (p.get("totalBetNanoTONs") or 0) + (p.get("totalGiftBetsPrice") or 0)
+                        parts[nm] = contrib
+                        ag = agg.setdefault(nm, [0, 0, 0])
+                        ag[0] += contrib
+                        ag[2] += 1
+                    if wname:
+                        agg.setdefault(wname, [0, 0, 0])[1] += pot
+                    if h2h_pair and a in parts and b in parts:
+                        _acc_h2h(overall, a, b, wname, pot, parts[a], parts[b])
                         if len(parts) == 2:
-                            account(duel, winner, pot, parts[me], parts[opp])
+                            _acc_h2h(duel, a, b, wname, pot, parts[a], parts[b])
+                    if seen >= max_games:
+                        break
                 cursor = data.get("cursor") or ""
                 if not cursor:
                     break
 
-        def to_ton(b):
-            return {"games": b["games"], "my_wins": b["my_wins"],
-                    "opp_wins": b["opp_wins"], "other_wins": b["other_wins"],
-                    "a_to_b_ton": b["a_to_b"] / 1e9, "b_to_a_ton": b["b_to_a"] / 1e9,
-                    "my_net_ton": b["my_net"] / 1e9, "opp_net_ton": b["opp_net"] / 1e9}
-        return {"me": me, "opp": opp, "scanned": seen,
-                "overall": to_ton(overall), "duel": to_ton(duel)}
+        pnl = {nm: {"bet_ton": bet / 1e9, "won_ton": won / 1e9,
+                    "net_ton": (won - bet) / 1e9, "games": n}
+               for nm, (bet, won, n) in agg.items()}
+        pnl["_scanned"] = seen
+        h2h = None
+        if h2h_pair:
+            h2h = {"me": a, "opp": b, "scanned": seen,
+                   "overall": _h2h_ton(overall), "duel": _h2h_ton(duel)}
+        return pnl, h2h
+
+    def pvp_pnl(self, since_iso: str | None = None, max_games: int = 20000):
+        return self.scan_pvp(since_iso, None, max_games)[0]
+
+    def pvp_head_to_head(self, me: str, opp: str, since_iso: str | None = None,
+                         max_games: int = 20000):
+        return self.scan_pvp(since_iso, (me, opp), max_games)[1]
 
 
 
@@ -209,6 +161,32 @@ def _num(x):
         return int(float(str(x).replace(" ", "").replace(",", "")))
     except Exception:
         return 0
+
+
+def _blank_h2h():
+    return {"games": 0, "my_wins": 0, "opp_wins": 0, "other_wins": 0,
+            "a_to_b": 0, "b_to_a": 0, "my_net": 0, "opp_net": 0}
+
+
+def _acc_h2h(bucket, a, b, winner, pot, a_c, b_c):
+    bucket["games"] += 1
+    if winner == a:
+        bucket["my_wins"] += 1
+        bucket["b_to_a"] += b_c
+    elif winner == b:
+        bucket["opp_wins"] += 1
+        bucket["a_to_b"] += a_c
+    else:
+        bucket["other_wins"] += 1
+    bucket["my_net"] += (pot if winner == a else 0) - a_c
+    bucket["opp_net"] += (pot if winner == b else 0) - b_c
+
+
+def _h2h_ton(b):
+    return {"games": b["games"], "my_wins": b["my_wins"],
+            "opp_wins": b["opp_wins"], "other_wins": b["other_wins"],
+            "a_to_b_ton": b["a_to_b"] / 1e9, "b_to_a_ton": b["b_to_a"] / 1e9,
+            "my_net_ton": b["my_net"] / 1e9, "opp_net_ton": b["opp_net"] / 1e9}
 
 
 def _room_ids(payload):

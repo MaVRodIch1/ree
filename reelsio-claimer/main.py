@@ -2928,19 +2928,23 @@ async def fetch_and_post_top(config, session_path):
             m = tgmrkt.TgMrkt(init_data, photo)
             m.auth()
             board = m.leaderboard(TOP_LEADERBOARD_SLUG)
-            pnl = None
+            pnl = h2h = None
             if TOP_PVP_ENABLED:
-                # Count PvP net from the contest start (timeRange.startAt).
-                since = None
-                if isinstance(board, dict):
-                    since = (board.get("timeRange") or {}).get("startAt")
+                # Count PvP net from the contest start (timeRange.startAt), and
+                # in the SAME scan compute the top-2 vs top-1 head-to-head.
+                since = (board.get("timeRange") or {}).get("startAt") \
+                    if isinstance(board, dict) else None
+                rows = tgmrkt.extract_rows(board)
+                pair = None
+                if len(rows) >= 2:
+                    pair = (rows[1]["name"], rows[0]["name"])  # top2 vs top1
                 try:
-                    pnl = m.pvp_pnl(since_iso=since)
+                    pnl, h2h = m.scan_pvp(since, pair)
                 except Exception as e:
                     logger.warning(f"Top: PvP P&L недоступен — {e}")
-            return board, pnl
+            return board, pnl, h2h
 
-        payload, pnl = await asyncio.to_thread(_work)
+        payload, pnl, h2h = await asyncio.to_thread(_work)
         rows = tgmrkt.extract_rows(payload)
         scanned = 0
         if isinstance(pnl, dict):
@@ -2955,6 +2959,9 @@ async def fetch_and_post_top(config, session_path):
             title=f"🏆 PlayHub — Топ 50  ({stamp})",
             pnl=pnl, ton_usd=TON_USD)
         await client.send_message(TOP_CHAT_ID, text)
+        # Second message: top-2 vs top-1 head-to-head.
+        if h2h and h2h.get("overall", {}).get("games", 0) > 0:
+            await client.send_message(TOP_CHAT_ID, _format_h2h(h2h, TON_USD))
         _save_top_snapshot(history, rows)
         logger.info(f"Top: лидерборд запощен ({len(rows)} мест; "
                     f"PvP: {len(pnl) if pnl else 0} игроков / {scanned} игр)")
