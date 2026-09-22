@@ -2782,6 +2782,22 @@ def _mrkt_photo(init_data: str):
         return None
 
 
+async def get_menu_webview_init_data(client, bot_username: str) -> str:
+    """initData for a bot whose menu button is a plain web-app URL (e.g. @mrkt →
+    https://cdn.tgmrkt.io/index.html), which RequestAppWebView can't handle."""
+    bot = await client.get_entity(bot_username)
+    full = await client(functions.users.GetFullUserRequest(bot))
+    menu = full.full_user.bot_info.menu_button if full.full_user.bot_info else None
+    url = getattr(menu, "url", None)
+    result = await client(functions.messages.RequestWebViewRequest(
+        peer=bot, bot=bot, platform="android", from_bot_menu=True, url=url))
+    params = parse_qs(urlparse(result.url).fragment)
+    init_data = params.get("tgWebAppData", [None])[0]
+    if not init_data:
+        raise RuntimeError("tgWebAppData not found in @mrkt webview URL")
+    return init_data
+
+
 def _load_top_history():
     if TOP_HISTORY_FILE.exists():
         try:
@@ -2825,7 +2841,7 @@ async def fetch_and_post_top(config, session_path):
         if not await client.is_user_authorized():
             logger.warning(f"Top: session {label} not authorized")
             return
-        init_data = await get_webapp_init_data(client, MRKT_BOT)
+        init_data = await get_menu_webview_init_data(client, MRKT_BOT)
         photo = _mrkt_photo(init_data)
 
         def _work():
