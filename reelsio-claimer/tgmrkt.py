@@ -14,14 +14,16 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0")
 
 
-def _headers() -> dict:
-    return {
+def _headers(json_body: bool = False) -> dict:
+    h = {
         "accept": "*/*",
-        "content-type": "application/json",
         "origin": "https://cdn.tgmrkt.io",
         "referer": "https://cdn.tgmrkt.io/",
         "user-agent": UA,
     }
+    if json_body:
+        h["content-type"] = "application/json"
+    return h
 
 
 def _find_leaderboard_id(active):
@@ -59,18 +61,18 @@ class TgMrkt:
     def auth(self) -> str:
         r = self.s.post(BASE + "/auth",
                         json={"data": self.init_data, "photo": self.photo, "appId": None},
-                        headers=_headers(), timeout=30)
+                        headers=_headers(json_body=True), timeout=30)
         r.raise_for_status()
         self.token = r.json().get("token")
-        if self.token:
-            self.s.headers["App-Token"] = self.token
-            self.s.headers["Authorization"] = self.token
+        # Auth is cookie-based (the app uses credentials:include). Do NOT set an
+        # Authorization header — a raw token there makes the API 400.
         return self.token
 
     def _get(self, path: str, **params):
         r = self.s.get(BASE + path, headers=_headers(),
                        params=params or None, timeout=30)
-        r.raise_for_status()
+        if not r.ok:
+            raise RuntimeError(f"GET {path} {r.status_code}: {r.text[:200]}")
         return r.json()
 
     def active_events(self):
