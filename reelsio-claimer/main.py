@@ -109,9 +109,9 @@ TOP_HISTORY_FILE = BASE_DIR / "top_history.json"  # score snapshots for hourly d
 TOP_USD_PER_POINT = 800 / 330000
 # The leaderboard slug (from /api/v1/leaderboard/<slug>). Update per contest.
 TOP_LEADERBOARD_SLUG = "playhub_hot_week"
-# PvP win/loss: how many recent games to scan for the net (0 = skip PvP), and
-# the TON→USD rate used to show net in dollars.
-TOP_PVP_MAX_GAMES = 400
+# PvP win/loss: whether to compute the net (scanned from the contest start),
+# and the TON→USD rate used to show net in dollars.
+TOP_PVP_ENABLED = True
 TON_USD = 3.0
 ASTEROID_REF = "6128719325"
 ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
@@ -2855,9 +2855,13 @@ async def fetch_and_post_top(config, session_path):
             m.auth()
             board = m.leaderboard(TOP_LEADERBOARD_SLUG)
             pnl = None
-            if TOP_PVP_MAX_GAMES > 0:
+            if TOP_PVP_ENABLED:
+                # Count PvP net from the contest start (timeRange.startAt).
+                since = None
+                if isinstance(board, dict):
+                    since = (board.get("timeRange") or {}).get("startAt")
                 try:
-                    pnl = m.pvp_pnl(TOP_PVP_MAX_GAMES)
+                    pnl = m.pvp_pnl(since_iso=since)
                 except Exception as e:
                     logger.warning(f"Top: PvP P&L недоступен — {e}")
             return board, pnl
@@ -3045,29 +3049,8 @@ async def run_combo(config):
             reels_active.clear()
         first_cycle = False
 
-    async def sixseven_night():
-        # Fish once per UTC day, but only during Golden Hours (00–08 UTC) for
-        # the higher legendary/golden-fish chance. Yields to Reels via pause.
-        last_day = None
-        while not shutdown_event.is_set():
-            now = datetime.now(timezone.utc)
-            if 0 <= now.hour < 8 and last_day != now.date():
-                sessions = get_session_files()
-                if sessions:
-                    logger.info("Combo: ночная рыбалка Six Seven (Golden Hours)")
-                    await sixseven_cycle(config, sessions, quiet=True,
-                                         pause_event=reels_active)
-                    last_day = now.date()
-            # check again in ~30 min (cheap; the window is 8h wide)
-            try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=1800)
-            except asyncio.TimeoutError:
-                pass
-
     # Background post monitor — reacts to new posts during rest windows.
     views = asyncio.create_task(views_monitor())
-    # Background night fisher — Six Seven during Golden Hours.
-    fisher = asyncio.create_task(sixseven_night())
     # Background leaderboard tracker — posts Top-50 to the chat.
     top = asyncio.create_task(
         top_tracker_task(config, top_session, pause_event=reels_active)) if want_top else None
@@ -3091,7 +3074,6 @@ async def run_combo(config):
     if sniper:
         sniper.cancel()
     views.cancel()
-    fisher.cancel()
     if top:
         top.cancel()
     logger.info("Combo stopped")

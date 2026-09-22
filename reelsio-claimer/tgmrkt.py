@@ -73,8 +73,10 @@ class TgMrkt:
             "minWinnings": None, "maxWinnings": None,
         })
 
-    def pvp_pnl(self, max_games: int = 400):
-        """Aggregate real PvP net per player across recent games.
+    def pvp_pnl(self, since_iso: str | None = None, max_games: int = 20000):
+        """Aggregate real PvP net per player across game history.
+        Scans newest→oldest and stops a room once games are older than
+        `since_iso` (the contest start), so it covers the whole event.
         net = winnings - (TON bets + gift bets), in TON. Returns
         {name: {net_ton, bet_ton, won_ton, games}}."""
         rooms = _room_ids(self.game_rooms())
@@ -82,12 +84,18 @@ class TgMrkt:
         seen = 0
         for rid in rooms:
             cursor = ""
-            while seen < max_games:
+            stop_room = False
+            while seen < max_games and not stop_room:
                 data = self.pvp_history(rid, cursor)
                 games = data.get("pvpGameHistoryDtos") or []
                 if not games:
                     break
                 for g in games:
+                    if since_iso:
+                        cad = g.get("createdAt") or ""
+                        if cad and cad < since_iso:
+                            stop_room = True  # older games follow → done here
+                            break
                     seen += 1
                     win = g.get("winner") or {}
                     pot = g.get("totalWinNanoTONs") or 0
@@ -110,6 +118,7 @@ class TgMrkt:
         return {nm: {"bet_ton": bet / 1e9, "won_ton": won / 1e9,
                      "net_ton": (won - bet) / 1e9, "games": n}
                 for nm, (bet, won, n) in agg.items()}
+
 
 
 
