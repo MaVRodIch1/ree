@@ -2797,7 +2797,7 @@ async def fetch_and_post_top(config, session_path):
         def _work():
             m = tgmrkt.TgMrkt(init_data, photo)
             m.auth()
-            return m.leaderboard()
+            return m.top_leaderboard()
 
         payload = await asyncio.to_thread(_work)
         text = tgmrkt.format_top(payload)

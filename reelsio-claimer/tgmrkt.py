@@ -3,19 +3,15 @@ tgmrkt.io (@mrkt) client — read the PlayHub/contest leaderboard (Top 50).
 
 Auth: POST /api/v1/auth  {data: <mini-app initData>, photo: <userpic url>, appId: null}
       -> {"token": "..."} and an access_token cookie (kept in the session).
-Subsequent calls reuse that cookie.
-
-⚠️ LEADERBOARD_PATH is a placeholder — needs one capture of the request that
-returns the Top 50 list (URL + response JSON), then fill it + format_top().
+Leaderboard (found in the app bundle team-events.queries):
+      GET /api/v1/team-events/active                     -> active events (leaderboardId)
+      GET /api/v1/team-events/ranking?leaderboardId=<id> -> the Top-50 ranking
 """
 import requests
 
 BASE = "https://api.tgmrkt.io/api/v1"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0")
-
-# ⚠️ FILL FROM CAPTURE: the endpoint that returns the Top-50 leaderboard.
-LEADERBOARD_PATH = "/contest/leaderboard"   # confirm path + method (GET?)
 
 
 def _headers() -> dict:
@@ -26,6 +22,31 @@ def _headers() -> dict:
         "referer": "https://cdn.tgmrkt.io/",
         "user-agent": UA,
     }
+
+
+def _find_leaderboard_id(active):
+    """Pull a leaderboardId out of the /team-events/active response."""
+    def from_item(it):
+        if isinstance(it, dict):
+            return (it.get("leaderboardId") or it.get("id")
+                    or (it.get("leaderboard") or {}).get("id"))
+        return None
+    if isinstance(active, list):
+        for it in active:
+            lid = from_item(it)
+            if lid:
+                return lid
+    elif isinstance(active, dict):
+        lid = from_item(active)
+        if lid:
+            return lid
+        for key in ("items", "events", "data", "active"):
+            if isinstance(active.get(key), list):
+                for it in active[key]:
+                    lid = from_item(it)
+                    if lid:
+                        return lid
+    return None
 
 
 class TgMrkt:
@@ -41,7 +62,6 @@ class TgMrkt:
                         headers=_headers(), timeout=30)
         r.raise_for_status()
         self.token = r.json().get("token")
-        # Also present the token as a header, in case the API wants it there too.
         if self.token:
             self.s.headers["App-Token"] = self.token
             self.s.headers["Authorization"] = self.token
@@ -53,9 +73,19 @@ class TgMrkt:
         r.raise_for_status()
         return r.json()
 
-    def leaderboard(self):
-        """Return the raw Top-50 leaderboard payload (shape TBD from capture)."""
-        return self._get(LEADERBOARD_PATH)
+    def active_events(self):
+        return self._get("/team-events/active")
+
+    def ranking(self, leaderboard_id):
+        return self._get("/team-events/ranking", leaderboardId=leaderboard_id)
+
+    def top_leaderboard(self):
+        """Auth-scoped: find the active event, return its Top-50 ranking."""
+        lid = _find_leaderboard_id(self.active_events())
+        if not lid:
+            raise RuntimeError("no active leaderboard event")
+        return self.ranking(lid)
+
 
 
 def format_top(payload, limit: int = 50, title: str = "🏆 Топ лидерборда") -> str:
