@@ -88,28 +88,60 @@ class TgMrkt:
 
 
 
-def format_top(payload, limit: int = 50, title: str = "🏆 Топ лидерборда") -> str:
-    """Format the leaderboard into a Telegram message. Tolerant of field names
-    until the real response shape is confirmed (rank/name/score variants)."""
-    # Find the list of entries inside the payload.
+def _num(x):
+    try:
+        return int(float(str(x).replace(" ", "").replace(",", "")))
+    except Exception:
+        return 0
+
+
+def extract_rows(payload):
+    """Normalise the ranking payload to [{rank,id,name,score}], tolerant of the
+    exact field names until the real response shape is confirmed."""
     rows = payload
     if isinstance(payload, dict):
-        for key in ("items", "leaderboard", "list", "data", "top", "results", "users"):
+        for key in ("items", "leaderboard", "list", "data", "ranking",
+                    "top", "results", "users", "members"):
             if isinstance(payload.get(key), list):
                 rows = payload[key]
                 break
-    if not isinstance(rows, list):
-        return f"{title}\n(не удалось разобрать ответ лидерборда)"
+    out = []
+    if isinstance(rows, list):
+        for i, e in enumerate(rows, 1):
+            if not isinstance(e, dict):
+                continue
+            user = e.get("user") if isinstance(e.get("user"), dict) else {}
+            rank = e.get("rank") or e.get("position") or e.get("place") or i
+            uid = (e.get("userId") or e.get("id") or user.get("id")
+                   or e.get("username") or user.get("username"))
+            name = (e.get("username") or e.get("name") or user.get("username")
+                    or user.get("name") or user.get("firstName") or str(uid))
+            score = (e.get("score") or e.get("points") or e.get("gram")
+                     or e.get("amount") or e.get("value") or e.get("balance") or 0)
+            out.append({"rank": rank, "id": str(uid), "name": name, "score": _num(score)})
+    return out
 
+
+def _grp(n):
+    return f"{n:,}".replace(",", " ")
+
+
+def format_leaderboard(rows, prev=None, usd_per_point=0.0,
+                       title="🏆 Топ лидерборда", limit=50) -> str:
+    """Render the leaderboard with an hourly gain (vs `prev` scores by id) and an
+    estimated spend (score * usd_per_point)."""
+    prev = prev or {}
     lines = [title]
-    for i, e in enumerate(rows[:limit], 1):
-        if not isinstance(e, dict):
-            continue
-        rank = e.get("rank") or e.get("position") or e.get("place") or i
-        name = (e.get("username") or e.get("name") or e.get("userName")
-                or e.get("title") or e.get("displayName") or "—")
-        score = (e.get("score") or e.get("points") or e.get("gram")
-                 or e.get("amount") or e.get("value") or "")
-        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(int(rank) if str(rank).isdigit() else 0, "")
-        lines.append(f"{medal or str(rank) + '.'} {name} — {score}")
+    for r in rows[:limit]:
+        rk = r["rank"] if isinstance(r["rank"], int) else 0
+        head = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rk, f"{r['rank']}.")
+        delta = ""
+        if r["id"] in prev:
+            d = r["score"] - prev[r["id"]]
+            delta = f" (+{_grp(d)}/ч)" if d > 0 else (" (0/ч)" if d == 0 else f" ({_grp(d)}/ч)")
+        spend = f" ~${_grp(round(r['score'] * usd_per_point))}" if usd_per_point > 0 else ""
+        lines.append(f"{head} {r['name']} — {_grp(r['score'])}{delta}{spend}")
+    if usd_per_point > 0:
+        lines.append("\n(траты — грубая оценка по очкам)")
     return "\n".join(lines)
+

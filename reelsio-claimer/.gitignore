@@ -66,6 +66,9 @@ wallets_backup.txt
 # Six Seven token-drop log
 sixseven_drops.txt
 
+# Leaderboard tracker score history
+top_history.json
+
 # Yandex.Disk import
 yandex_links.txt
 yandex_2fa.txt

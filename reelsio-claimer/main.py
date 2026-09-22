@@ -103,6 +103,10 @@ SIXSEVEN_DROPS_FILE = BASE_DIR / "sixseven_drops.txt"  # accounts that caught 67
 MRKT_BOT = "mrkt"                     # @mrkt — tgmrkt.io mini app
 TOP_CHAT_ID = -1003788532837          # chat to post the leaderboard into
 TOP_INTERVAL_MINUTES = 30             # how often to refresh + post the top
+TOP_HISTORY_FILE = BASE_DIR / "top_history.json"  # score snapshots for hourly deltas
+# Rough spend calibration: rank #2 (~330k pts) is said to be ~$800 spent.
+# → ~$0.00242 per point. Tweak here to recalibrate.
+TOP_USD_PER_POINT = 800 / 330000
 ASTEROID_REF = "6128719325"
 ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
 # Temporarily disabled in combo after an anti-bot warning from the project.
@@ -2778,8 +2782,38 @@ def _mrkt_photo(init_data: str):
         return None
 
 
+def _load_top_history():
+    if TOP_HISTORY_FILE.exists():
+        try:
+            return json.loads(TOP_HISTORY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+    return []
+
+
+def _scores_about_1h_ago(history):
+    """Return the score map from the snapshot closest to 1h ago (±20min)."""
+    target = time.time() - 3600
+    best, best_gap = None, 1200  # within 20 min
+    for snap in history:
+        gap = abs(snap.get("t", 0) - target)
+        if gap <= best_gap:
+            best, best_gap = snap, gap
+    return (best or {}).get("scores", {})
+
+
+def _save_top_snapshot(history, rows):
+    history.append({"t": time.time(), "scores": {r["id"]: r["score"] for r in rows}})
+    history = history[-48:]  # keep ~24h at 30-min cadence
+    try:
+        TOP_HISTORY_FILE.write_text(json.dumps(history), encoding="utf-8")
+    except Exception:
+        pass
+
+
 async def fetch_and_post_top(config, session_path):
-    """Open @mrkt on `session_path`, read the Top-50, post it to TOP_CHAT_ID."""
+    """Open @mrkt on `session_path`, read the Top-50, post it to TOP_CHAT_ID
+    with an hourly gain per player and a rough spend estimate."""
     import tgmrkt
     api_id, api_hash = int(config["api_id"]), str(config["api_hash"])
     label = session_path.stem
@@ -2800,9 +2834,16 @@ async def fetch_and_post_top(config, session_path):
             return m.top_leaderboard()
 
         payload = await asyncio.to_thread(_work)
-        text = tgmrkt.format_top(payload)
+        rows = tgmrkt.extract_rows(payload)
+        history = _load_top_history()
+        prev = _scores_about_1h_ago(history)
+        stamp = datetime.now(timezone.utc).strftime("%d.%m %H:%M UTC")
+        text = tgmrkt.format_leaderboard(
+            rows, prev, TOP_USD_PER_POINT,
+            title=f"🏆 PlayHub — Топ 50  ({stamp})")
         await client.send_message(TOP_CHAT_ID, text)
-        logger.info("Top: лидерборд запощен в чат")
+        _save_top_snapshot(history, rows)
+        logger.info(f"Top: лидерборд запощен ({len(rows)} мест)")
     except Exception as e:
         logger.error(f"Top: ошибка — {e}")
     finally:
