@@ -129,6 +129,75 @@ class TgMrkt:
         out["_scanned"] = seen
         return out
 
+    def pvp_head_to_head(self, me: str, opp: str, since_iso: str | None = None,
+                         max_games: int = 20000):
+        """Head-to-head PvP stats between `me` and `opp` over games where BOTH
+        played. Attributes a loser's stake to the game's winner. Returns TON
+        figures for all shared games and for strictly 1-vs-1 games."""
+        try:
+            rooms = _room_ids(self.game_rooms())
+        except Exception:
+            rooms = []
+
+        def blank():
+            return {"games": 0, "my_wins": 0, "opp_wins": 0, "other_wins": 0,
+                    "a_to_b": 0, "b_to_a": 0, "my_net": 0, "opp_net": 0}
+        overall, duel = blank(), blank()
+        seen = 0
+
+        def account(bucket, winner, pot, my_c, opp_c):
+            bucket["games"] += 1
+            if winner == me:
+                bucket["my_wins"] += 1
+                bucket["b_to_a"] += opp_c
+            elif winner == opp:
+                bucket["opp_wins"] += 1
+                bucket["a_to_b"] += my_c
+            else:
+                bucket["other_wins"] += 1
+            bucket["my_net"] += (pot if winner == me else 0) - my_c
+            bucket["opp_net"] += (pot if winner == opp else 0) - opp_c
+
+        for rid in rooms:
+            cursor, stop_room, pages = "", False, 0
+            while seen < max_games and not stop_room and pages < 2000:
+                pages += 1
+                try:
+                    data = self.pvp_history(rid, cursor)
+                except Exception:
+                    break
+                games = data.get("pvpGameHistoryDtos") or []
+                if not games:
+                    break
+                for g in games:
+                    if since_iso and (g.get("createdAt") or "") < since_iso:
+                        stop_room = True
+                        break
+                    seen += 1
+                    parts = {}
+                    for p in g.get("participants") or []:
+                        nm = p.get("publicName")
+                        if nm:
+                            parts[nm] = (p.get("totalBetNanoTONs") or 0) + (p.get("totalGiftBetsPrice") or 0)
+                    if me in parts and opp in parts:
+                        winner = (g.get("winner") or {}).get("publicName")
+                        pot = g.get("totalWinNanoTONs") or 0
+                        account(overall, winner, pot, parts[me], parts[opp])
+                        if len(parts) == 2:
+                            account(duel, winner, pot, parts[me], parts[opp])
+                cursor = data.get("cursor") or ""
+                if not cursor:
+                    break
+
+        def to_ton(b):
+            return {"games": b["games"], "my_wins": b["my_wins"],
+                    "opp_wins": b["opp_wins"], "other_wins": b["other_wins"],
+                    "a_to_b_ton": b["a_to_b"] / 1e9, "b_to_a_ton": b["b_to_a"] / 1e9,
+                    "my_net_ton": b["my_net"] / 1e9, "opp_net_ton": b["opp_net"] / 1e9}
+        return {"me": me, "opp": opp, "scanned": seen,
+                "overall": to_ton(overall), "duel": to_ton(duel)}
+
+
 
 
 

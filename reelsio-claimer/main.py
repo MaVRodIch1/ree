@@ -1822,6 +1822,7 @@ def choose_action():
                 ("👁 Просмотры постов канала", "views"),
                 ("🎯 Снайпер комментариев (первый коммент)", "sniper"),
                 ("📊 Слежение за топом @mrkt (постить в чат)", "top_tracker"),
+                ("🎯 PvP 1-на-1: я против игрока", "pvp_h2h"),
             ])
             if sub:
                 return sub
@@ -2833,6 +2834,74 @@ def _save_top_snapshot(history, rows):
         pass
 
 
+async def run_pvp_h2h(config):
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}🎯 PvP 1-на-1: ты против игрока{c['reset']}")
+    session_path = pick_session("PvP H2H — твоя сессия @mrkt")
+    if not session_path:
+        return
+    import tgmrkt
+    api_id, api_hash = int(config["api_id"]), str(config["api_hash"])
+    label = session_path.stem
+    client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            print(f"{c['yel']}Сессия не авторизована.{c['reset']}")
+            return
+        init_data = await get_menu_webview_init_data(client, MRKT_BOT)
+        photo = _mrkt_photo(init_data)
+
+        def _auth_board():
+            m = tgmrkt.TgMrkt(init_data, photo)
+            m.auth()
+            return m, m.leaderboard(TOP_LEADERBOARD_SLUG)
+
+        m, board = await asyncio.to_thread(_auth_board)
+        rows = tgmrkt.extract_rows(board)
+        me_name = (board.get("me") or {}).get("name") if isinstance(board, dict) else None
+        top1 = rows[0]["name"] if rows else ""
+        print(f"{c['dim']}Ты: {me_name or '?'}. Топ-1: {top1}.{c['reset']}")
+        opp = input(f"Против кого считать? (Enter — {top1}): ").strip() or top1
+        me_name = input(f"Твой ник в mrkt (Enter — {me_name}): ").strip() or me_name
+        if not me_name or not opp:
+            print(f"{c['yel']}Нужны оба ника.{c['reset']}")
+            return
+        since = (board.get("timeRange") or {}).get("startAt") if isinstance(board, dict) else None
+        print(f"{c['dim']}Считаю историю игр… (это может занять минуту){c['reset']}")
+        h = await asyncio.to_thread(m.pvp_head_to_head, me_name, opp, since)
+        text = _format_h2h(h, TON_USD)
+        print(text)
+        if input("Отправить это в чат? (y/n) [n]: ").strip().lower() in ("y", "yes", "да"):
+            await client.send_message(TOP_CHAT_ID, text)
+            print(f"{c['grn']}Отправлено.{c['reset']}")
+    except Exception as e:
+        print(f"{c['yel']}Ошибка: {e}{c['reset']}")
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+def _format_h2h(h, ton_usd=0.0):
+    def usd(t):
+        return f" (${round(t * ton_usd):+,})".replace(",", " ") if ton_usd else ""
+    def block(b, title):
+        g = b["games"]
+        if not g:
+            return f"{title}: совместных игр нет"
+        wr = 100 * b["my_wins"] / g
+        return (f"{title} — игр: {g}\n"
+                f"  Твои победы: {b['my_wins']} ({wr:.0f}%) · его: {b['opp_wins']} · другие: {b['other_wins']}\n"
+                f"  Ты слил ему: {b['a_to_b_ton']:.1f} TON{usd(b['a_to_b_ton'])}\n"
+                f"  Он слил тебе: {b['b_to_a_ton']:.1f} TON{usd(b['b_to_a_ton'])}\n"
+                f"  Твой нетто в этих играх: {b['my_net_ton']:+.1f} TON{usd(b['my_net_ton'])}")
+    return (f"🎯 PvP: {h['me']} vs {h['opp']}  (просканировано {h['scanned']} игр)\n\n"
+            f"{block(h['overall'], '▪️ Все совместные игры')}\n\n"
+            f"{block(h['duel'], '⚔️ Только 1-на-1')}")
+
+
 async def fetch_and_post_top(config, session_path):
     """Open @mrkt on `session_path`, read the Top-50, post it to TOP_CHAT_ID
     with an hourly gain per player and a rough spend estimate."""
@@ -3146,6 +3215,9 @@ async def main():
             return
         if action == "top_tracker":
             await run_top_tracker(config)
+            return
+        if action == "pvp_h2h":
+            await run_pvp_h2h(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
