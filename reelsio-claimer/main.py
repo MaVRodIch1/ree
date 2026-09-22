@@ -107,6 +107,9 @@ TOP_HISTORY_FILE = BASE_DIR / "top_history.json"  # score snapshots for hourly d
 # Rough spend calibration: rank #2 (~330k pts) is said to be ~$800 spent.
 # → ~$0.00242 per point. Tweak here to recalibrate.
 TOP_USD_PER_POINT = 800 / 330000
+# If /team-events/active is NOT_ALLOWED for the tracker account, set the event
+# id here (grab it from the app's /ranking?leaderboardId=<id> request).
+TOP_LEADERBOARD_ID = None
 ASTEROID_REF = "6128719325"
 ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
 # Temporarily disabled in combo after an anti-bot warning from the project.
@@ -2847,7 +2850,7 @@ async def fetch_and_post_top(config, session_path):
         def _work():
             m = tgmrkt.TgMrkt(init_data, photo)
             m.auth()
-            return m.top_leaderboard()
+            return m.top_leaderboard(TOP_LEADERBOARD_ID)
 
         payload = await asyncio.to_thread(_work)
         rows = tgmrkt.extract_rows(payload)

@@ -81,11 +81,13 @@ class TgMrkt:
     def ranking(self, leaderboard_id):
         return self._get("/team-events/ranking", leaderboardId=leaderboard_id)
 
-    def top_leaderboard(self):
-        """Auth-scoped: find the active event, return its Top-50 ranking."""
-        lid = _find_leaderboard_id(self.active_events())
+    def top_leaderboard(self, leaderboard_id=None):
+        """Return the Top-50 ranking. If leaderboard_id is given, call /ranking
+        directly (works even when /active is NOT_ALLOWED for this account);
+        otherwise discover it via /team-events/active."""
+        lid = leaderboard_id or _find_leaderboard_id(self.active_events())
         if not lid:
-            raise RuntimeError("no active leaderboard event")
+            raise RuntimeError("no leaderboardId (set TOP_LEADERBOARD_ID)")
         return self.ranking(lid)
 
 
