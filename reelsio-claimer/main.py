@@ -115,6 +115,11 @@ TOP_LEADERBOARD_SLUG = "playhub_hot_week"
 # and the TON→USD rate used to show net in dollars.
 TOP_PVP_ENABLED = True
 TON_USD = 3.0
+TOP_PVP_DEADLINE = 100        # max seconds for the PvP scan (keeps posts on time)
+TOP_PVP_MAX_GAMES = 12000     # hard cap on games scanned
+TOP_PVP_CACHE_FILE = BASE_DIR / "top_pvp_cache.json"  # last good PvP result
+# Auto-post the top2-vs-top1 head-to-head each hour (off — use the menu instead).
+TOP_H2H_ENABLED = False
 ASTEROID_REF = "6128719325"
 ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
 # Temporarily disabled in combo after an anti-bot warning from the project.
@@ -2816,6 +2821,22 @@ def _load_top_history():
     return []
 
 
+def _load_pvp_cache():
+    if TOP_PVP_CACHE_FILE.exists():
+        try:
+            return json.loads(TOP_PVP_CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_pvp_cache(data):
+    try:
+        TOP_PVP_CACHE_FILE.write_text(json.dumps(data), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _scores_about(history, ago_seconds, tol):
     """Score map from the snapshot closest to `ago_seconds` ago (within tol)."""
     target = time.time() - ago_seconds
@@ -2952,27 +2973,35 @@ async def fetch_and_post_top(config, session_path):
             board = m.leaderboard(TOP_LEADERBOARD_SLUG)
             pnl = h2h = None
             if TOP_PVP_ENABLED:
-                # Count PvP net from the contest start (timeRange.startAt), and
-                # in the SAME scan compute the top-2 vs top-1 head-to-head.
                 since = (board.get("timeRange") or {}).get("startAt") \
                     if isinstance(board, dict) else None
                 rows = tgmrkt.extract_rows(board)
                 pair = None
-                if len(rows) >= 2:
+                if TOP_H2H_ENABLED and len(rows) >= 2:
                     pair = (rows[1]["name"], rows[0]["name"])  # top2 vs top1
                 try:
-                    pnl, h2h = m.scan_pvp(since, pair)
+                    pnl, h2h = m.scan_pvp(since, pair, TOP_PVP_MAX_GAMES,
+                                          deadline_s=TOP_PVP_DEADLINE)
                 except Exception as e:
                     logger.warning(f"Top: PvP P&L недоступен — {e}")
             return board, pnl, h2h
 
         payload, pnl, h2h = await asyncio.to_thread(_work)
         rows = tgmrkt.extract_rows(payload)
-        scanned = 0
+        # PvP cache: a full/large scan is saved; a truncated one reuses the last
+        # good result so the net doesn't jump around between posts.
+        scanned = complete = 0
         if isinstance(pnl, dict):
             scanned = pnl.pop("_scanned", 0)
+            complete = pnl.pop("_complete", True)
             if not pnl:
                 pnl = None
+        cache = _load_pvp_cache()
+        if pnl and (complete or scanned >= cache.get("scanned", 0)):
+            _save_pvp_cache({"scanned": scanned, "pnl": pnl})
+        elif cache.get("pnl"):
+            pnl, scanned = cache["pnl"], cache.get("scanned", 0)  # reuse last good
+
         history = _load_top_history()
         prev = _scores_about_1h_ago(history)
         stamp = datetime.now(MSK).strftime("%d.%m %H:%M МСК")
@@ -2981,8 +3010,8 @@ async def fetch_and_post_top(config, session_path):
             title=f"🏆 PlayHub — Топ 50  ({stamp})",
             pnl=pnl, ton_usd=TON_USD)
         await client.send_message(TOP_CHAT_ID, text)
-        # Second message: top-2 vs top-1 head-to-head.
-        if h2h and h2h.get("overall", {}).get("games", 0) > 0:
+        # Optional second message: top-2 vs top-1 head-to-head (off by default).
+        if TOP_H2H_ENABLED and h2h and h2h.get("overall", {}).get("games", 0) > 0:
             await client.send_message(TOP_CHAT_ID, _format_h2h(h2h, TON_USD))
         # Once a day: a "gained over 24h" recap, sorted by gain.
         today = datetime.now(MSK).strftime("%Y-%m-%d")

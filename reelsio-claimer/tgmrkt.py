@@ -8,6 +8,8 @@ Leaderboard (confirmed live):
       GET /api/v1/leaderboard/<slug>?offset=0&count=50&get-finished=false
       -> {top100:[{name,position,points,picture,isMe}], me:{...}, totalPoints, timeRange}
 """
+import time
+
 import requests
 
 BASE = "https://api.tgmrkt.io/api/v1"
@@ -74,17 +76,19 @@ class TgMrkt:
         })
 
     def scan_pvp(self, since_iso: str | None = None, h2h_pair=None,
-                 max_games: int = 20000):
+                 max_games: int = 20000, deadline_s: float | None = None):
         """Single pass over PvP history (newest→oldest, stops per room once older
-        than since_iso). Always aggregates per-player net; if h2h_pair=(a,b) is
-        given, also aggregates head-to-head for that pair. Resilient to failed
-        pages (returns partial). Returns (pnl_dict, h2h_dict_or_None)."""
+        than since_iso). Bounded by max_games and an optional wall-clock
+        deadline_s so it never blocks the hourly post. Returns
+        (pnl_dict, h2h_dict_or_None); pnl carries "_scanned" and "_complete"."""
+        started = time.time()
         try:
             rooms = _room_ids(self.game_rooms())
         except Exception:
             rooms = []
         agg = {}
         seen = 0
+        complete = True
         a = b = None
         overall = duel = None
         if h2h_pair:
@@ -94,10 +98,15 @@ class TgMrkt:
         for rid in rooms:
             cursor, stop_room, pages = "", False, 0
             while seen < max_games and not stop_room and pages < 2000:
+                if deadline_s and time.time() - started > deadline_s:
+                    complete = False
+                    stop_room = True
+                    break
                 pages += 1
                 try:
                     data = self.pvp_history(rid, cursor)
                 except Exception:
+                    complete = False
                     break
                 games = data.get("pvpGameHistoryDtos") or []
                 if not games:
@@ -131,11 +140,14 @@ class TgMrkt:
                 cursor = data.get("cursor") or ""
                 if not cursor:
                     break
+            if not complete and deadline_s and time.time() - started > deadline_s:
+                break  # out of time — stop scanning further rooms too
 
         pnl = {nm: {"bet_ton": bet / 1e9, "won_ton": won / 1e9,
                     "net_ton": (won - bet) / 1e9, "games": n}
                for nm, (bet, won, n) in agg.items()}
         pnl["_scanned"] = seen
+        pnl["_complete"] = complete
         h2h = None
         if h2h_pair:
             h2h = {"me": a, "opp": b, "scanned": seen,

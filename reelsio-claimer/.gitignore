@@ -77,3 +77,6 @@ yandex_tmp/
 
 # Leaderboard daily-recap state
 top_daily.txt
+
+# Leaderboard PvP cache
+top_pvp_cache.json
