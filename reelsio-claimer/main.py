@@ -114,10 +114,10 @@ TOP_LEADERBOARD_SLUG = "playhub_hot_week"
 # PvP win/loss: whether to compute the net (scanned from the contest start),
 # and the TON→USD rate used to show net in dollars.
 TOP_PVP_ENABLED = True
-TON_USD = 3.0
-TOP_PVP_DEADLINE = 100        # max seconds for the PvP scan (keeps posts on time)
-TOP_PVP_MAX_GAMES = 12000     # hard cap on games scanned
-TOP_PVP_CACHE_FILE = BASE_DIR / "top_pvp_cache.json"  # last good PvP result
+TON_USD = 3.0                 # fallback if the live TON price can't be fetched
+TOP_PVP_DEADLINE = 90         # max seconds per run for the incremental PvP scan
+TOP_PVP_MAX_GAMES = 8000      # max new games folded in per run
+TOP_PVP_STATE_FILE = BASE_DIR / "top_pvp_state.json"  # persistent PvP totals
 # Auto-post the top2-vs-top1 head-to-head each hour (off — use the menu instead).
 TOP_H2H_ENABLED = False
 ASTEROID_REF = "6128719325"
@@ -2821,18 +2821,18 @@ def _load_top_history():
     return []
 
 
-def _load_pvp_cache():
-    if TOP_PVP_CACHE_FILE.exists():
+def _load_pvp_state():
+    if TOP_PVP_STATE_FILE.exists():
         try:
-            return json.loads(TOP_PVP_CACHE_FILE.read_text(encoding="utf-8"))
+            return json.loads(TOP_PVP_STATE_FILE.read_text(encoding="utf-8"))
         except Exception:
             return {}
     return {}
 
 
-def _save_pvp_cache(data):
+def _save_pvp_state(state):
     try:
-        TOP_PVP_CACHE_FILE.write_text(json.dumps(data), encoding="utf-8")
+        TOP_PVP_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
     except Exception:
         pass
 
@@ -2967,41 +2967,29 @@ async def fetch_and_post_top(config, session_path):
         init_data = await get_menu_webview_init_data(client, MRKT_BOT)
         photo = _mrkt_photo(init_data)
 
-        def _work():
+        def _work(state):
             m = tgmrkt.TgMrkt(init_data, photo)
             m.auth()
             board = m.leaderboard(TOP_LEADERBOARD_SLUG)
-            pnl = h2h = None
+            added = 0
             if TOP_PVP_ENABLED:
                 since = (board.get("timeRange") or {}).get("startAt") \
                     if isinstance(board, dict) else None
-                rows = tgmrkt.extract_rows(board)
-                pair = None
-                if TOP_H2H_ENABLED and len(rows) >= 2:
-                    pair = (rows[1]["name"], rows[0]["name"])  # top2 vs top1
                 try:
-                    pnl, h2h = m.scan_pvp(since, pair, TOP_PVP_MAX_GAMES,
-                                          deadline_s=TOP_PVP_DEADLINE)
+                    added = m.accumulate_pvp(state, since,
+                                             deadline_s=TOP_PVP_DEADLINE,
+                                             max_new=TOP_PVP_MAX_GAMES)
                 except Exception as e:
-                    logger.warning(f"Top: PvP P&L недоступен — {e}")
+                    logger.warning(f"Top: PvP накопление — {e}")
             rate = tgmrkt.ton_usd_rate(TON_USD)  # live TON→USD
-            return board, pnl, h2h, rate
+            return board, added, rate
 
-        payload, pnl, h2h, rate = await asyncio.to_thread(_work)
+        pvp_state = _load_pvp_state()
+        payload, added, rate = await asyncio.to_thread(_work, pvp_state)
         rows = tgmrkt.extract_rows(payload)
-        # PvP cache: a full/large scan is saved; a truncated one reuses the last
-        # good result so the net doesn't jump around between posts.
-        scanned = complete = 0
-        if isinstance(pnl, dict):
-            scanned = pnl.pop("_scanned", 0)
-            complete = pnl.pop("_complete", True)
-            if not pnl:
-                pnl = None
-        cache = _load_pvp_cache()
-        if pnl and (complete or scanned >= cache.get("scanned", 0)):
-            _save_pvp_cache({"scanned": scanned, "pnl": pnl})
-        elif cache.get("pnl"):
-            pnl, scanned = cache["pnl"], cache.get("scanned", 0)  # reuse last good
+        pnl = tgmrkt.pnl_from_state(pvp_state) if TOP_PVP_ENABLED else None
+        if TOP_PVP_ENABLED:
+            _save_pvp_state(pvp_state)
 
         history = _load_top_history()
         prev = _scores_about_1h_ago(history)
@@ -3011,9 +2999,6 @@ async def fetch_and_post_top(config, session_path):
             title=f"🏆 PlayHub — Топ 50  ({stamp}, TON ${rate:.2f})",
             pnl=pnl, ton_usd=rate)
         await client.send_message(TOP_CHAT_ID, text)
-        # Optional second message: top-2 vs top-1 head-to-head (off by default).
-        if TOP_H2H_ENABLED and h2h and h2h.get("overall", {}).get("games", 0) > 0:
-            await client.send_message(TOP_CHAT_ID, _format_h2h(h2h, rate))
         # Once a day: a "gained over 24h" recap, sorted by gain.
         today = datetime.now(MSK).strftime("%Y-%m-%d")
         last_daily = ""
@@ -3030,8 +3015,11 @@ async def fetch_and_post_top(config, session_path):
                 except Exception:
                     pass
         _save_top_snapshot(history, rows)
-        logger.info(f"Top: лидерборд запощен ({len(rows)} мест; "
-                    f"PvP: {len(pnl) if pnl else 0} игроков / {scanned} игр)")
+        done_rooms = sum(1 for r in (pvp_state.get("rooms") or {}).values() if r.get("done"))
+        total_rooms = len(pvp_state.get("rooms") or {})
+        logger.info(f"Top: запощено ({len(rows)} мест; PvP игроков "
+                    f"{len(pnl) if pnl else 0}, +{added} новых игр, "
+                    f"история {done_rooms}/{total_rooms} комнат готово)")
     except Exception as e:
         logger.error(f"Top: ошибка — {e}")
     finally:

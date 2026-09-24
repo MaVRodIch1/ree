@@ -164,6 +164,94 @@ class TgMrkt:
                          max_games: int = 20000):
         return self.scan_pvp(since_iso, (me, opp), max_games)[1]
 
+    def accumulate_pvp(self, state: dict, since_iso: str | None = None,
+                       deadline_s: float = 60, max_new: int = 8000) -> int:
+        """Incrementally fold PvP history into a persistent `state`, counting
+        each game exactly once. Per room we remember the counted id band
+        [low, high]: new games (id>high) are added every run; older games
+        (id<low) are backfilled a bit each run until `since_iso`. This keeps
+        totals monotonic and fast (no full re-scan). Returns games added."""
+        started = time.time()
+        players = state.setdefault("players", {})  # name -> [bet, won, games, wins]
+        rooms_state = state.setdefault("rooms", {})
+        try:
+            rooms = _room_ids(self.game_rooms())
+        except Exception:
+            rooms = []
+        total_new = 0
+
+        def agg(g):
+            win = g.get("winner") or {}
+            wname = win.get("publicName")
+            pot = g.get("totalWinNanoTONs") or 0
+            for p in g.get("participants") or []:
+                nm = p.get("publicName")
+                if not nm:
+                    continue
+                contrib = (p.get("totalBetNanoTONs") or 0) + (p.get("totalGiftBetsPrice") or 0)
+                a = players.setdefault(nm, [0, 0, 0, 0])
+                a[0] += contrib
+                a[2] += 1
+            if wname:
+                w = players.setdefault(wname, [0, 0, 0, 0])
+                w[1] += pot
+                w[3] += 1
+
+        for rid in rooms:
+            rs = rooms_state.setdefault(rid, {"high": 0, "low": None, "done": False})
+            high, low, done = rs["high"], rs["low"], rs.get("done", False)
+            new_high, new_low = high, low
+            cursor, pages, stop = "", 0, False
+            while not stop and pages < 5000:
+                if time.time() - started > deadline_s or total_new >= max_new:
+                    break
+                pages += 1
+                try:
+                    data = self.pvp_history(rid, cursor)
+                except Exception:
+                    break
+                games = data.get("pvpGameHistoryDtos") or []
+                if not games:
+                    done = True
+                    break
+                for g in games:
+                    gid = g.get("id") or 0
+                    cad = g.get("createdAt") or ""
+                    if since_iso and cad and cad < since_iso:
+                        done = True
+                        stop = True
+                        break
+                    in_band = (low is not None and low <= gid <= high)
+                    if in_band:
+                        if done:            # nothing new below → stop early
+                            stop = True
+                            break
+                        continue            # page through counted band to backfill
+                    agg(g)
+                    new_high = gid if gid > new_high else new_high
+                    new_low = gid if (new_low is None or gid < new_low) else new_low
+                    total_new += 1
+                    if total_new >= max_new:
+                        stop = True
+                        break
+                cursor = data.get("cursor") or ""
+                if not cursor:
+                    done = True
+                    break
+            rs["high"], rs["low"], rs["done"] = new_high, new_low, done
+        return total_new
+
+
+def pnl_from_state(state: dict) -> dict:
+    """Build the {name: {net_ton, games, wins, winrate, ...}} view from state."""
+    out = {}
+    for nm, v in (state.get("players") or {}).items():
+        bet, won, n, wins = v
+        out[nm] = {"bet_ton": bet / 1e9, "won_ton": won / 1e9,
+                   "net_ton": (won - bet) / 1e9, "games": n, "wins": wins,
+                   "winrate": (100 * wins / n) if n else 0}
+    return out
+
 
 
 
