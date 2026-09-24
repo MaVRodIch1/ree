@@ -2870,8 +2870,10 @@ def _pvp_coverage_note(board, state):
     return f"⏱ PvP: история догружается ({done}/{total} комнат)"
 
 
-def _free_farmers_note(rows, pnl, ton_usd, limit=8, min_games=15, min_net=-15.0):
-    """Players who farm (almost) for free: PvP net near zero or positive."""
+def _free_farmers_note(rows, pnl, ton_usd, since_label="", limit=12,
+                       min_games=15, min_net=-15.0):
+    """Players who farm (almost) for free over the WHOLE contest: PvP net near
+    zero or positive. Uses the accumulated-from-start net, same as the table."""
     import html as _html
     cand = []
     for r in rows:
@@ -2881,7 +2883,9 @@ def _free_farmers_note(rows, pnl, ton_usd, limit=8, min_games=15, min_net=-15.0)
     if not cand:
         return None
     cand.sort(reverse=True)
-    lines = ["<b>💚 Фармят бесплатно / в плюс (нетто ≈0 или +):</b>"]
+    head = "💚 Фармят бесплатно / в плюс"
+    head += f" — с начала турнира{(' (' + since_label + ')') if since_label else ''}:"
+    lines = [f"<b>{head}</b>"]
     for net, name, wr, g in cand[:limit]:
         sign = "+" if net >= 0 else ""
         lines.append(f"• {_html.escape(name)}: {sign}{net:.0f} TON · {wr:.0f}% из {g}")
@@ -3045,7 +3049,16 @@ async def fetch_and_post_top(config, session_path):
             pnl=pnl, ton_usd=rate)
         if pnl:
             text += "\n" + _pvp_coverage_note(payload, pvp_state)
-            free = _free_farmers_note(rows, pnl, rate)
+            since = (payload.get("timeRange") or {}).get("startAt") \
+                if isinstance(payload, dict) else None
+            since_label = ""
+            if since:
+                try:
+                    since_label = datetime.fromisoformat(
+                        since.replace("Z", "+00:00")).astimezone(MSK).strftime("%d.%m")
+                except Exception:
+                    since_label = ""
+            free = _free_farmers_note(rows, pnl, rate, since_label)
             if free:
                 text += "\n" + free
         await client.send_message(TOP_CHAT_ID, text, parse_mode="html")
