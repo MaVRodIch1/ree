@@ -126,11 +126,13 @@ class TgMrkt:
                             continue
                         contrib = (p.get("totalBetNanoTONs") or 0) + (p.get("totalGiftBetsPrice") or 0)
                         parts[nm] = contrib
-                        ag = agg.setdefault(nm, [0, 0, 0])
+                        ag = agg.setdefault(nm, [0, 0, 0, 0])
                         ag[0] += contrib
                         ag[2] += 1
                     if wname:
-                        agg.setdefault(wname, [0, 0, 0])[1] += pot
+                        w = agg.setdefault(wname, [0, 0, 0, 0])
+                        w[1] += pot   # won amount
+                        w[3] += 1     # win count
                     if h2h_pair and a in parts and b in parts:
                         _acc_h2h(overall, a, b, wname, pot, parts[a], parts[b])
                         if len(parts) == 2:
@@ -144,8 +146,9 @@ class TgMrkt:
                 break  # out of time — stop scanning further rooms too
 
         pnl = {nm: {"bet_ton": bet / 1e9, "won_ton": won / 1e9,
-                    "net_ton": (won - bet) / 1e9, "games": n}
-               for nm, (bet, won, n) in agg.items()}
+                    "net_ton": (won - bet) / 1e9, "games": n, "wins": w,
+                    "winrate": (100 * w / n) if n else 0}
+               for nm, (bet, won, n, w) in agg.items()}
         pnl["_scanned"] = seen
         pnl["_complete"] = complete
         h2h = None
@@ -249,6 +252,19 @@ def _grp(n):
     return f"{n:,}".replace(",", " ")
 
 
+def ton_usd_rate(fallback=3.0):
+    """Live TON→USD price (CoinGecko), with a fallback constant."""
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "the-open-network", "vs_currencies": "usd"},
+            timeout=15)
+        v = r.json().get("the-open-network", {}).get("usd")
+        return float(v) if v else fallback
+    except Exception:
+        return fallback
+
+
 def format_leaderboard(rows, prev=None, usd_per_point=0.0,
                        title="🏆 Топ лидерборда", limit=50,
                        pnl=None, ton_usd=0.0) -> str:
@@ -270,12 +286,13 @@ def format_leaderboard(rows, prev=None, usd_per_point=0.0,
             net = p["net_ton"]
             usd = f" (${_grp(round(net * ton_usd))})" if ton_usd else ""
             sign = "+" if net >= 0 else ""
-            tail = f" | PvP {sign}{net:.1f} TON{usd}"
+            wr = f"{p['winrate']:.0f}% из {p['games']}" if p.get("games") else "нет игр"
+            tail = f" | PvP {wr} · {sign}{net:.1f} TON{usd}"
         elif usd_per_point > 0:
             tail = f" ~${_grp(round(r['score'] * usd_per_point))}"
         lines.append(f"{head} {r['name']} — {_grp(r['score'])}{delta}{tail}")
     if pnl:
-        lines.append("\n(PvP — реальный нетто по истории игр; +выиграл / −проиграл)")
+        lines.append("\n(PvP: винрейт из N игр · нетто TON; + выиграл / − проиграл)")
     elif usd_per_point > 0:
         lines.append("\n(траты — грубая оценка по очкам)")
     return "\n".join(lines)

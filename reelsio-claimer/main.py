@@ -2914,7 +2914,7 @@ async def run_pvp_h2h(config):
         since = (board.get("timeRange") or {}).get("startAt") if isinstance(board, dict) else None
         print(f"{c['dim']}Считаю историю игр {a} vs {b}… (может занять минуту){c['reset']}")
         h = await asyncio.to_thread(m.pvp_head_to_head, a, b, since)
-        text = _format_h2h(h, TON_USD)
+        text = _format_h2h(h, await asyncio.to_thread(tgmrkt.ton_usd_rate, TON_USD))
         print(text)
         if input("Отправить это в чат? (y/n) [n]: ").strip().lower() in ("y", "yes", "да"):
             await client.send_message(TOP_CHAT_ID, text)
@@ -2984,9 +2984,10 @@ async def fetch_and_post_top(config, session_path):
                                           deadline_s=TOP_PVP_DEADLINE)
                 except Exception as e:
                     logger.warning(f"Top: PvP P&L недоступен — {e}")
-            return board, pnl, h2h
+            rate = tgmrkt.ton_usd_rate(TON_USD)  # live TON→USD
+            return board, pnl, h2h, rate
 
-        payload, pnl, h2h = await asyncio.to_thread(_work)
+        payload, pnl, h2h, rate = await asyncio.to_thread(_work)
         rows = tgmrkt.extract_rows(payload)
         # PvP cache: a full/large scan is saved; a truncated one reuses the last
         # good result so the net doesn't jump around between posts.
@@ -3007,12 +3008,12 @@ async def fetch_and_post_top(config, session_path):
         stamp = datetime.now(MSK).strftime("%d.%m %H:%M МСК")
         text = tgmrkt.format_leaderboard(
             rows, prev, TOP_USD_PER_POINT,
-            title=f"🏆 PlayHub — Топ 50  ({stamp})",
-            pnl=pnl, ton_usd=TON_USD)
+            title=f"🏆 PlayHub — Топ 50  ({stamp}, TON ${rate:.2f})",
+            pnl=pnl, ton_usd=rate)
         await client.send_message(TOP_CHAT_ID, text)
         # Optional second message: top-2 vs top-1 head-to-head (off by default).
         if TOP_H2H_ENABLED and h2h and h2h.get("overall", {}).get("games", 0) > 0:
-            await client.send_message(TOP_CHAT_ID, _format_h2h(h2h, TON_USD))
+            await client.send_message(TOP_CHAT_ID, _format_h2h(h2h, rate))
         # Once a day: a "gained over 24h" recap, sorted by gain.
         today = datetime.now(MSK).strftime("%Y-%m-%d")
         last_daily = ""
