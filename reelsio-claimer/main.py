@@ -2870,25 +2870,34 @@ def _pvp_coverage_note(board, state):
     return f"⏱ PvP: история догружается ({done}/{total} комнат)"
 
 
-def _free_farmers_note(rows, pnl, ton_usd, since_label="", limit=12,
-                       min_games=15, min_net=-15.0):
-    """Players who farm (almost) for free over the WHOLE contest: PvP net near
-    zero or positive. Uses the accumulated-from-start net, same as the table."""
+def _free_farmers_note(rows, pnl, ton_usd, since_label="", limit=14, min_games=10):
+    """Ranking of who farmed points the cheapest over the whole contest.
+    Points come from tasks (gifts); gifts are either bought or WON in PvP. So a
+    player with PvP net ≥ 0 got their points essentially for free; a net-negative
+    player paid ≈|net| TON for them (efficiency = points per TON lost)."""
     import html as _html
-    cand = []
+    plus, paid = [], []
     for r in rows:
         p = pnl.get(r["name"])
-        if p and p["games"] >= min_games and p["net_ton"] >= min_net:
-            cand.append((p["net_ton"], r["name"], p["winrate"], p["games"]))
-    if not cand:
+        if not p or p["games"] < min_games:
+            continue
+        net, pts = p["net_ton"], r["score"]
+        if net >= 0:
+            plus.append((net, r["name"], pts))
+        else:
+            paid.append((pts / abs(net), r["name"], pts, net))
+    if not plus and not paid:
         return None
-    cand.sort(reverse=True)
-    head = "💚 Фармят бесплатно / в плюс"
-    head += f" — с начала турнира{(' (' + since_label + ')') if since_label else ''}:"
-    lines = [f"<b>{head}</b>"]
-    for net, name, wr, g in cand[:limit]:
-        sign = "+" if net >= 0 else ""
-        lines.append(f"• {_html.escape(name)}: {sign}{net:.0f} TON · {wr:.0f}% из {g}")
+    plus.sort(reverse=True)          # most in profit first
+    paid.sort(reverse=True)          # most points per TON first (cheapest)
+
+    head = f"💰 Кто фармит дешевле — с начала турнира{(' (' + since_label + ')') if since_label else ''}:"
+    note = "<i>в плюсе по PvP = очки бесплатно; иначе — очков за 1 слитый TON</i>"
+    lines = [f"<b>{head}</b>", note]
+    for net, name, pts in plus:
+        lines.append(f"🟢 {_html.escape(name)}: +{net:.0f} TON — {pts:,} очков бесплатно".replace(",", " "))
+    for eff, name, pts, net in paid[:max(0, limit - len(plus))]:
+        lines.append(f"• {_html.escape(name)}: {net:.0f} TON — {pts:,} очк ({eff:.0f} очк/TON)".replace(",", " "))
     return "\n".join(lines)
     """Per-player gain over ~24h, sorted by gain."""
     items = []
