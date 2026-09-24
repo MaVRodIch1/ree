@@ -2852,7 +2852,39 @@ def _scores_about_1h_ago(history):
     return _scores_about(history, 3600, 1800)
 
 
-def _format_daily(rows, day_ago, limit=50):
+def _pvp_coverage_note(board, state):
+    """One line: is PvP counted for the whole contest yet, or still loading."""
+    rooms = state.get("rooms") or {}
+    total = len(rooms)
+    done = sum(1 for r in rooms.values() if r.get("done"))
+    since = (board.get("timeRange") or {}).get("startAt") if isinstance(board, dict) else None
+    since_d = ""
+    if since:
+        try:
+            since_d = datetime.fromisoformat(since.replace("Z", "+00:00")).astimezone(MSK).strftime("%d.%m")
+        except Exception:
+            since_d = ""
+    if total and done >= total:
+        return f"⏱ PvP посчитан за весь турнир{(' (с ' + since_d + ')') if since_d else ''}"
+    return f"⏱ PvP: история догружается ({done}/{total} комнат)"
+
+
+def _free_farmers_note(rows, pnl, ton_usd, limit=8, min_games=15, min_net=-15.0):
+    """Players who farm (almost) for free: PvP net near zero or positive."""
+    cand = []
+    for r in rows:
+        p = pnl.get(r["name"])
+        if p and p["games"] >= min_games and p["net_ton"] >= min_net:
+            cand.append((p["net_ton"], r["name"], p["winrate"], p["games"]))
+    if not cand:
+        return None
+    cand.sort(reverse=True)
+    lines = ["💚 Фармят бесплатно / в плюс (нетто ≈0 или +):"]
+    for net, name, wr, g in cand[:limit]:
+        sign = "+" if net >= 0 else ""
+        usd = f" (${round(net * ton_usd):+})" if ton_usd else ""
+        lines.append(f"• {name}: {sign}{net:.1f} TON{usd} · {wr:.0f}% из {g}")
+    return "\n".join(lines)
     """Per-player gain over ~24h, sorted by gain."""
     items = []
     for r in rows:
@@ -2998,6 +3030,11 @@ async def fetch_and_post_top(config, session_path):
             rows, prev, TOP_USD_PER_POINT,
             title=f"🏆 PlayHub — Топ 50  ({stamp}, TON ${rate:.2f})",
             pnl=pnl, ton_usd=rate)
+        if pnl:
+            text += "\n" + _pvp_coverage_note(payload, pvp_state)
+            free = _free_farmers_note(rows, pnl, rate)
+            if free:
+                text += "\n\n" + free
         await client.send_message(TOP_CHAT_ID, text)
         # Once a day: a "gained over 24h" recap, sorted by gain.
         today = datetime.now(MSK).strftime("%Y-%m-%d")
