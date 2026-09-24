@@ -8,6 +8,7 @@ Leaderboard (confirmed live):
       GET /api/v1/leaderboard/<slug>?offset=0&count=50&get-finished=false
       -> {top100:[{name,position,points,picture,isMe}], me:{...}, totalPoints, timeRange}
 """
+import html as _html
 import time
 
 import requests
@@ -356,33 +357,34 @@ def ton_usd_rate(fallback=3.0):
 def format_leaderboard(rows, prev=None, usd_per_point=0.0,
                        title="🏆 Топ лидерборда", limit=50,
                        pnl=None, ton_usd=0.0) -> str:
-    """Render the leaderboard with an hourly gain (vs `prev` by name) and either
-    a real PvP net (from `pnl`, in TON/$) or a rough points-based spend."""
+    """HTML message: a monospace table (rank · name · points · hourly gain ·
+    PvP net TON · win%). Send with parse_mode='html'."""
     prev = prev or {}
     pnl = pnl or {}
-    lines = [title]
+
+    def row(rank, name, pts, delta, net, wr):
+        return f"{rank:<2} {name:<13} {pts:>7} {delta:>6} {net:>6} {wr:>4}"
+
+    table = [row("#", "Игрок", "Очки", "Δ/ч", "PvP", "WR%")]
     for r in rows[:limit]:
-        rk = r["rank"] if isinstance(r["rank"], int) else 0
-        head = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rk, f"{r['rank']}.")
+        name = r["name"]
+        name = (name[:12] + "…") if len(name) > 13 else name
         delta = ""
         if r["id"] in prev:
-            d = r["score"] - prev[r["id"]]
-            delta = f" (+{_grp(d)}/ч)" if d > 0 else (" (0/ч)" if d == 0 else f" ({_grp(d)}/ч)")
-        tail = ""
+            g = r["score"] - prev[r["id"]]
+            delta = f"{g:+d}" if g else "0"
         p = pnl.get(r["name"])
-        if p is not None:
-            net = p["net_ton"]
-            usd = f" (${_grp(round(net * ton_usd))})" if ton_usd else ""
-            sign = "+" if net >= 0 else ""
-            wr = f"{p['winrate']:.0f}% из {p['games']}" if p.get("games") else "нет игр"
-            tail = f" | PvP {wr} · {sign}{net:.1f} TON{usd}"
-        elif usd_per_point > 0:
-            tail = f" ~${_grp(round(r['score'] * usd_per_point))}"
-        lines.append(f"{head} {r['name']} — {_grp(r['score'])}{delta}{tail}")
-    if pnl:
-        lines.append("\n(PvP: винрейт из N игр · нетто TON; + выиграл / − проиграл)")
-    elif usd_per_point > 0:
-        lines.append("\n(траты — грубая оценка по очкам)")
-    return "\n".join(lines)
+        if p and p.get("games"):
+            net = f"{round(p['net_ton']):+d}"
+            wr = f"{round(p['winrate'])}%"
+        else:
+            net, wr = "—", "—"
+        table.append(row(r["rank"], name, r["score"], delta, net, wr))
+
+    body = "<pre>" + _html.escape("\n".join(table)) + "</pre>"
+    note = ("<i>Очки — фарм заданий · Δ/ч — прирост за час · "
+            "PvP — нетто в TON (+выиграл/−слил) · WR — винрейт</i>")
+    return f"<b>{_html.escape(title)}</b>\n{body}\n{note}"
+
 
 

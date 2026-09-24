@@ -115,8 +115,9 @@ TOP_LEADERBOARD_SLUG = "playhub_hot_week"
 # and the TON→USD rate used to show net in dollars.
 TOP_PVP_ENABLED = True
 TON_USD = 3.0                 # fallback if the live TON price can't be fetched
-TOP_PVP_DEADLINE = 90         # max seconds per run for the incremental PvP scan
-TOP_PVP_MAX_GAMES = 8000      # max new games folded in per run
+TOP_PVP_DEADLINE = 90         # per-run seconds once the baseline is built
+TOP_PVP_BASELINE_DEADLINE = 600  # generous budget while first building all-time history
+TOP_PVP_MAX_GAMES = 30000     # cap on games folded per run (covers a full contest)
 TOP_PVP_STATE_FILE = BASE_DIR / "top_pvp_state.json"  # persistent PvP totals
 # Auto-post the top2-vs-top1 head-to-head each hour (off — use the menu instead).
 TOP_H2H_ENABLED = False
@@ -2871,6 +2872,7 @@ def _pvp_coverage_note(board, state):
 
 def _free_farmers_note(rows, pnl, ton_usd, limit=8, min_games=15, min_net=-15.0):
     """Players who farm (almost) for free: PvP net near zero or positive."""
+    import html as _html
     cand = []
     for r in rows:
         p = pnl.get(r["name"])
@@ -2879,11 +2881,10 @@ def _free_farmers_note(rows, pnl, ton_usd, limit=8, min_games=15, min_net=-15.0)
     if not cand:
         return None
     cand.sort(reverse=True)
-    lines = ["💚 Фармят бесплатно / в плюс (нетто ≈0 или +):"]
+    lines = ["<b>💚 Фармят бесплатно / в плюс (нетто ≈0 или +):</b>"]
     for net, name, wr, g in cand[:limit]:
         sign = "+" if net >= 0 else ""
-        usd = f" (${round(net * ton_usd):+})" if ton_usd else ""
-        lines.append(f"• {name}: {sign}{net:.1f} TON{usd} · {wr:.0f}% из {g}")
+        lines.append(f"• {_html.escape(name)}: {sign}{net:.0f} TON · {wr:.0f}% из {g}")
     return "\n".join(lines)
     """Per-player gain over ~24h, sorted by gain."""
     items = []
@@ -3007,9 +3008,13 @@ async def fetch_and_post_top(config, session_path):
             if TOP_PVP_ENABLED:
                 since = (board.get("timeRange") or {}).get("startAt") \
                     if isinstance(board, dict) else None
+                rooms = state.get("rooms") or {}
+                # Big budget until the all-time history is fully built; small
+                # incremental budget afterwards.
+                complete = bool(rooms) and all(r.get("done") for r in rooms.values())
+                dl = TOP_PVP_DEADLINE if complete else TOP_PVP_BASELINE_DEADLINE
                 try:
-                    added = m.accumulate_pvp(state, since,
-                                             deadline_s=TOP_PVP_DEADLINE,
+                    added = m.accumulate_pvp(state, since, deadline_s=dl,
                                              max_new=TOP_PVP_MAX_GAMES)
                 except Exception as e:
                     logger.warning(f"Top: PvP накопление — {e}")
@@ -3019,9 +3024,17 @@ async def fetch_and_post_top(config, session_path):
         pvp_state = _load_pvp_state()
         payload, added, rate = await asyncio.to_thread(_work, pvp_state)
         rows = tgmrkt.extract_rows(payload)
-        pnl = tgmrkt.pnl_from_state(pvp_state) if TOP_PVP_ENABLED else None
         if TOP_PVP_ENABLED:
             _save_pvp_state(pvp_state)
+        # Hold the first post until the whole-contest history is built.
+        rooms = pvp_state.get("rooms") or {}
+        pvp_ready = bool(rooms) and all(r.get("done") for r in rooms.values())
+        if TOP_PVP_ENABLED and not pvp_ready:
+            done = sum(1 for r in rooms.values() if r.get("done"))
+            logger.info(f"Top: обсчитываю историю с начала турнира "
+                        f"({done}/{len(rooms)} комнат, +{added} игр) — пост позже")
+            return
+        pnl = tgmrkt.pnl_from_state(pvp_state) if TOP_PVP_ENABLED else None
 
         history = _load_top_history()
         prev = _scores_about_1h_ago(history)
@@ -3034,8 +3047,8 @@ async def fetch_and_post_top(config, session_path):
             text += "\n" + _pvp_coverage_note(payload, pvp_state)
             free = _free_farmers_note(rows, pnl, rate)
             if free:
-                text += "\n\n" + free
-        await client.send_message(TOP_CHAT_ID, text)
+                text += "\n" + free
+        await client.send_message(TOP_CHAT_ID, text, parse_mode="html")
         # Once a day: a "gained over 24h" recap, sorted by gain.
         today = datetime.now(MSK).strftime("%Y-%m-%d")
         last_daily = ""
