@@ -2872,40 +2872,52 @@ def _pvp_coverage_note(board, state):
 
 def _free_farmers_note(rows, pnl, ton_usd, since_label="", limit=12, min_games=10):
     """Who pulled the most FREE gift material out of PvP over the contest.
-    Points come from tasks (sending gifts), which the API doesn't expose per
-    player — so we can't compute points-spend. What we CAN show is how much gift
-    value each player WON in PvP (free gifts they could feed into tasks), plus
-    their overall PvP net."""
+
+    Points come from TASKS (sending gifts), which the API doesn't expose per
+    player — so PvP net is NOT the point-cost and can't be compared to points.
+    What we CAN show honestly:
+      • 🎁 gift value WON in PvP — free gifts the player can feed into tasks;
+      • PvP net (won − staked, TON-equivalent incl. gift value) — did they come
+        out ahead or bleed TON.
+    If gift data isn't rebuilt yet (all zeros), we fall back to ranking by net so
+    the block still says something useful."""
     import html as _html
+
+    def usd(t):
+        return f" (~${round(t * ton_usd)})" if ton_usd else ""
+
     cand = []
     for r in rows:
         p = pnl.get(r["name"])
         if not p or p["games"] < min_games:
             continue
-        cand.append((p.get("gift_won_ton", 0), p["net_ton"], r["name"], r["score"]))
+        cand.append((p.get("gift_won_ton", 0), p["net_ton"], r["name"]))
     if not cand:
         return None
-    cand.sort(reverse=True)  # most gifts won for free first
-    head = f"🎁 Больше всех выиграли гифтов в PvP (бесплатный материал для заданий) — с {since_label}:" \
-        if since_label else "🎁 Больше всех выиграли гифтов в PvP (бесплатный материал):"
-    note = "<i>очки идут за задания-гифты, не за PvP; тут — сколько гифтов выиграно даром</i>"
-    lines = [f"<b>{head}</b>", note]
-    for gift, net, name, pts in cand[:limit]:
-        sign = "+" if net >= 0 else ""
-        lines.append(f"• {_html.escape(name)}: 🎁 {gift:.0f} TON выиграл · PvP нетто {sign}{net:.0f} TON")
-    return "\n".join(lines)
-    """Per-player gain over ~24h, sorted by gain."""
-    items = []
-    for r in rows:
-        if r["id"] in day_ago:
-            items.append((r["score"] - day_ago[r["id"]], r["name"]))
-    if not items:
-        return None
-    items.sort(reverse=True)
-    lines = [f"📅 Прирост за сутки  ({datetime.now(MSK).strftime('%d.%m %H:%M МСК')})"]
-    for i, (d, name) in enumerate(items[:limit], 1):
-        val = f"+{d:,}".replace(",", " ") if d >= 0 else f"{d:,}".replace(",", " ")
-        lines.append(f"{i}. {name}: {val}")
+
+    have_gifts = any(g > 0 for g, _n, _nm in cand)
+    if have_gifts:
+        cand.sort(key=lambda x: x[0], reverse=True)  # most gifts won for free first
+        head = ("🎁 Больше всех выиграли гифтов в PvP "
+                "(бесплатный материал для заданий)"
+                + (f" — с {since_label}:" if since_label else ":"))
+        note = ("<i>очки идут за задания-гифты, не за PvP; тут — сколько гифтов "
+                "выиграно даром и общий PvP-нетто</i>")
+        lines = [f"<b>{head}</b>", note]
+        for gift, net, name in cand[:limit]:
+            sign = "+" if net >= 0 else ""
+            lines.append(f"• {_html.escape(name)}: 🎁 {gift:.0f} TON{usd(gift)} выиграл "
+                         f"· нетто {sign}{net:.0f} TON")
+    else:
+        # Gift breakdown not ready (cache still rebuilding) — rank by net.
+        cand.sort(key=lambda x: x[1], reverse=True)
+        head = ("💹 PvP-нетто по игрокам (кто в плюсе — тот брал материал даром)"
+                + (f" — с {since_label}:" if since_label else ":"))
+        note = "<i>гифт-разбивка догружается; пока показываю чистый PvP-нетто</i>"
+        lines = [f"<b>{head}</b>", note]
+        for _gift, net, name in cand[:limit]:
+            sign = "+" if net >= 0 else ""
+            lines.append(f"• {_html.escape(name)}: нетто {sign}{net:.0f} TON{usd(net)}")
     return "\n".join(lines)
 
 

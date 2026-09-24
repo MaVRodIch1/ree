@@ -17,6 +17,12 @@ BASE = "https://api.tgmrkt.io/api/v1"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0")
 
+# Per-player PvP record layout: [staked, won, games, wins, gift_won] (all nanoTON).
+# Bump this when the layout changes so old cache files rebuild cleanly instead of
+# crashing on a missing index. v2 added gift_won (index 4).
+PVP_STATE_VERSION = 2
+PVP_RECORD_LEN = 5
+
 
 def _headers(json_body: bool = False) -> dict:
     h = {
@@ -173,7 +179,19 @@ class TgMrkt:
         (id<low) are backfilled a bit each run until `since_iso`. This keeps
         totals monotonic and fast (no full re-scan). Returns games added."""
         started = time.time()
-        players = state.setdefault("players", {})  # name -> [bet, won, games, wins]
+        # Auto-heal older cache files: if the record layout changed, drop the
+        # aggregates and re-scan the whole contest cleanly (the caller holds the
+        # first post until the rebuild completes). This is what populates
+        # gift_won for the whole tournament instead of leaving it at 0.
+        if state.get("v") != PVP_STATE_VERSION:
+            state["players"] = {}
+            state["rooms"] = {}
+            state["v"] = PVP_STATE_VERSION
+        players = state.setdefault("players", {})  # name -> [staked, won, games, wins, gift_won]
+        # Belt-and-suspenders: pad any short record so w[4] never IndexErrors.
+        for _rec in players.values():
+            while len(_rec) < PVP_RECORD_LEN:
+                _rec.append(0)
         rooms_state = state.setdefault("rooms", {})
         try:
             rooms = _room_ids(self.game_rooms())
