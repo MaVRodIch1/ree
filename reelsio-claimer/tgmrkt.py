@@ -185,18 +185,20 @@ class TgMrkt:
             win = g.get("winner") or {}
             wname = win.get("publicName")
             pot = g.get("totalWinNanoTONs") or 0
+            gift_win = g.get("totalGiftWinNanoTONs") or 0
             for p in g.get("participants") or []:
                 nm = p.get("publicName")
                 if not nm:
                     continue
                 contrib = (p.get("totalBetNanoTONs") or 0) + (p.get("totalGiftBetsPrice") or 0)
-                a = players.setdefault(nm, [0, 0, 0, 0])
+                a = players.setdefault(nm, [0, 0, 0, 0, 0])
                 a[0] += contrib
                 a[2] += 1
             if wname:
-                w = players.setdefault(wname, [0, 0, 0, 0])
+                w = players.setdefault(wname, [0, 0, 0, 0, 0])
                 w[1] += pot
                 w[3] += 1
+                w[4] += gift_win   # value of gifts won (free material for tasks)
 
         for rid in rooms:
             rs = rooms_state.setdefault(rid, {"high": 0, "low": None, "done": False})
@@ -244,13 +246,15 @@ class TgMrkt:
 
 
 def pnl_from_state(state: dict) -> dict:
-    """Build the {name: {net_ton, games, wins, winrate, ...}} view from state."""
+    """Build the {name: {net_ton, games, wins, winrate, gift_won_ton}} view."""
     out = {}
     for nm, v in (state.get("players") or {}).items():
-        bet, won, n, wins = v
+        bet, won, n, wins = v[0], v[1], v[2], v[3]
+        gift_won = v[4] if len(v) > 4 else 0
         out[nm] = {"bet_ton": bet / 1e9, "won_ton": won / 1e9,
                    "net_ton": (won - bet) / 1e9, "games": n, "wins": wins,
-                   "winrate": (100 * wins / n) if n else 0}
+                   "winrate": (100 * wins / n) if n else 0,
+                   "gift_won_ton": gift_won / 1e9}
     return out
 
 
