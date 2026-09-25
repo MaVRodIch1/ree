@@ -17,11 +17,23 @@ BASE = "https://api.tgmrkt.io/api/v1"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0")
 
-# Per-player PvP record layout: [staked, won, games, wins, gift_won] (all nanoTON).
-# Bump this when the layout changes so old cache files rebuild cleanly instead of
-# crashing on a missing index. v2 added gift_won (index 4).
-PVP_STATE_VERSION = 2
-PVP_RECORD_LEN = 5
+# Per-player PvP record layout (all nanoTON):
+#   [0] staked      own bet (gift value + TON), every game
+#   [1] won         pot received when this player is the winner
+#   [2] games       games played
+#   [3] wins        games won
+#   [4] gift_took   gift value TAKEN FROM OPPONENTS when winning
+#                   (= gift pot minus the winner's own gift bet — a returned
+#                    own gift is NOT a win)
+#   [5] ton_took    TON taken from opponents when winning (= ton pot − own ton bet)
+#   [6] gift_bled   own gift value lost to the winner in games lost
+#   [7] ton_bled    own TON lost to the winner in games lost
+# Bump PVP_STATE_VERSION when the layout changes so old cache files rebuild
+# cleanly instead of reading stale/short records.
+#   v2 added gift_won; v3 split winnings into "taken from opponents" vs the
+#   player's own returned stake, and tracks what each player bled.
+PVP_STATE_VERSION = 3
+PVP_RECORD_LEN = 8
 
 
 def _headers(json_body: bool = False) -> dict:
@@ -187,11 +199,18 @@ class TgMrkt:
             state["players"] = {}
             state["rooms"] = {}
             state["v"] = PVP_STATE_VERSION
-        players = state.setdefault("players", {})  # name -> [staked, won, games, wins, gift_won]
-        # Belt-and-suspenders: pad any short record so w[4] never IndexErrors.
+        players = state.setdefault("players", {})  # name -> record (see layout above)
+        # Belt-and-suspenders: pad any short record so no index ever IndexErrors.
         for _rec in players.values():
             while len(_rec) < PVP_RECORD_LEN:
                 _rec.append(0)
+
+        def rec(nm):
+            r = players.setdefault(nm, [0] * PVP_RECORD_LEN)
+            while len(r) < PVP_RECORD_LEN:
+                r.append(0)
+            return r
+
         rooms_state = state.setdefault("rooms", {})
         try:
             rooms = _room_ids(self.game_rooms())
@@ -203,20 +222,35 @@ class TgMrkt:
             win = g.get("winner") or {}
             wname = win.get("publicName")
             pot = g.get("totalWinNanoTONs") or 0
-            gift_win = g.get("totalGiftWinNanoTONs") or 0
-            for p in g.get("participants") or []:
+            gift_pot = g.get("totalGiftWinNanoTONs") or 0
+            ton_pot = g.get("totalTonWinNanoTONs") or 0
+            parts = g.get("participants") or []
+            # The winner's OWN stake returns to them on a win — not "won from
+            # others". Find it so we can subtract it out.
+            win_gift_bet = win_ton_bet = 0
+            for p in parts:
+                if p.get("publicName") == wname:
+                    win_gift_bet = p.get("totalGiftBetsPrice") or 0
+                    win_ton_bet = p.get("totalBetNanoTONs") or 0
+            for p in parts:
                 nm = p.get("publicName")
                 if not nm:
                     continue
-                contrib = (p.get("totalBetNanoTONs") or 0) + (p.get("totalGiftBetsPrice") or 0)
-                a = players.setdefault(nm, [0, 0, 0, 0, 0])
-                a[0] += contrib
+                gbet = p.get("totalGiftBetsPrice") or 0
+                tbet = p.get("totalBetNanoTONs") or 0
+                a = rec(nm)
+                a[0] += gbet + tbet
                 a[2] += 1
+                if nm != wname:          # this player lost — their stake bled to the winner
+                    a[6] += gbet
+                    a[7] += tbet
             if wname:
-                w = players.setdefault(wname, [0, 0, 0, 0, 0])
+                w = rec(wname)
                 w[1] += pot
                 w[3] += 1
-                w[4] += gift_win   # value of gifts won (free material for tasks)
+                # Value actually taken FROM OPPONENTS (own returned stake excluded).
+                w[4] += max(0, gift_pot - win_gift_bet)
+                w[5] += max(0, ton_pot - win_ton_bet)
 
         for rid in rooms:
             rs = rooms_state.setdefault(rid, {"high": 0, "low": None, "done": False})
@@ -264,15 +298,29 @@ class TgMrkt:
 
 
 def pnl_from_state(state: dict) -> dict:
-    """Build the {name: {net_ton, games, wins, winrate, gift_won_ton}} view."""
+    """Per-player PvP view, in TON:
+      net_ton     overall profit/loss (won − staked)
+      took_ton    value TAKEN FROM OPPONENTS when winning (free material) —
+                  gift_took_ton + ton_took_ton, own returned stake excluded
+      bled_ton    value LOST to opponents in games lost (gift_bled + ton_bled)
+      gift_took_ton / ton_took_ton / gift_bled_ton / ton_bled_ton  breakdown
+    """
+    def g(v, i):
+        return v[i] if len(v) > i else 0
     out = {}
     for nm, v in (state.get("players") or {}).items():
         bet, won, n, wins = v[0], v[1], v[2], v[3]
-        gift_won = v[4] if len(v) > 4 else 0
-        out[nm] = {"bet_ton": bet / 1e9, "won_ton": won / 1e9,
-                   "net_ton": (won - bet) / 1e9, "games": n, "wins": wins,
-                   "winrate": (100 * wins / n) if n else 0,
-                   "gift_won_ton": gift_won / 1e9}
+        gift_took, ton_took = g(v, 4), g(v, 5)
+        gift_bled, ton_bled = g(v, 6), g(v, 7)
+        out[nm] = {
+            "bet_ton": bet / 1e9, "won_ton": won / 1e9,
+            "net_ton": (won - bet) / 1e9, "games": n, "wins": wins,
+            "winrate": (100 * wins / n) if n else 0,
+            "took_ton": (gift_took + ton_took) / 1e9,
+            "bled_ton": (gift_bled + ton_bled) / 1e9,
+            "gift_took_ton": gift_took / 1e9, "ton_took_ton": ton_took / 1e9,
+            "gift_bled_ton": gift_bled / 1e9, "ton_bled_ton": ton_bled / 1e9,
+        }
     return out
 
 

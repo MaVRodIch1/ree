@@ -2871,16 +2871,18 @@ def _pvp_coverage_note(board, state):
 
 
 def _free_farmers_note(rows, pnl, ton_usd, since_label="", limit=12, min_games=10):
-    """Who pulled the most FREE gift material out of PvP over the contest.
+    """Who pulled the most value OUT of opponents in PvP over the contest.
 
-    Points come from TASKS (sending gifts), which the API doesn't expose per
-    player — so PvP net is NOT the point-cost and can't be compared to points.
-    What we CAN show honestly:
-      • 🎁 gift value WON in PvP — free gifts the player can feed into tasks;
-      • PvP net (won − staked, TON-equivalent incl. gift value) — did they come
-        out ahead or bleed TON.
-    If gift data isn't rebuilt yet (all zeros), we fall back to ranking by net so
-    the block still says something useful."""
+    Mechanic (per the players): you stake a gift + a little TON; opponents stake
+    TON. On a win your OWN gift comes back to you — that's NOT winning material,
+    so it must be excluded. What is real:
+      • «забрал» = value TAKEN FROM OPPONENTS across won games (their TON + their
+        gifts) — the genuinely free material;
+      • «слил»   = your own stake lost to winners in games you lost;
+      • «нетто»  = забрал − слил − комиссия (overall profit/loss).
+    A player deep in the minus did NOT farm for free — they funded everyone else.
+    Points themselves come from TASKS, not PvP, so this is the material side only.
+    Ranked by «забрал»; falls back to net while the cache is still rebuilding."""
     import html as _html
 
     def usd(t):
@@ -2891,31 +2893,32 @@ def _free_farmers_note(rows, pnl, ton_usd, since_label="", limit=12, min_games=1
         p = pnl.get(r["name"])
         if not p or p["games"] < min_games:
             continue
-        cand.append((p.get("gift_won_ton", 0), p["net_ton"], r["name"]))
+        cand.append((p.get("took_ton", 0), p.get("bled_ton", 0),
+                     p["net_ton"], r["name"]))
     if not cand:
         return None
 
-    have_gifts = any(g > 0 for g, _n, _nm in cand)
-    if have_gifts:
-        cand.sort(key=lambda x: x[0], reverse=True)  # most gifts won for free first
-        head = ("🎁 Больше всех выиграли гифтов в PvP "
-                "(бесплатный материал для заданий)"
+    have_data = any(t > 0 or b > 0 for t, b, _n, _nm in cand)
+    if have_data:
+        cand.sort(key=lambda x: x[0], reverse=True)  # most taken from opponents first
+        head = ("💰 Кто больше всех забрал у соперников в PvP"
                 + (f" — с {since_label}:" if since_label else ":"))
-        note = ("<i>очки идут за задания-гифты, не за PvP; тут — сколько гифтов "
-                "выиграно даром и общий PvP-нетто</i>")
+        note = ("<i>забрал = чужие TON+гифты, выигранные у соперников (свой "
+                "возвращённый гифт не считается); нетто = итог с учётом слитого. "
+                "Очки идут за задания-гифты, не за PvP.</i>")
         lines = [f"<b>{head}</b>", note]
-        for gift, net, name in cand[:limit]:
+        for took, bled, net, name in cand[:limit]:
             sign = "+" if net >= 0 else ""
-            lines.append(f"• {_html.escape(name)}: 🎁 {gift:.0f} TON{usd(gift)} выиграл "
-                         f"· нетто {sign}{net:.0f} TON")
+            lines.append(f"• {_html.escape(name)}: забрал {took:.0f} TON{usd(took)} "
+                         f"· слил {bled:.0f} · нетто {sign}{net:.0f}")
     else:
-        # Gift breakdown not ready (cache still rebuilding) — rank by net.
-        cand.sort(key=lambda x: x[1], reverse=True)
-        head = ("💹 PvP-нетто по игрокам (кто в плюсе — тот брал материал даром)"
+        # Cache still rebuilding — rank by net so the block still says something.
+        cand.sort(key=lambda x: x[2], reverse=True)
+        head = ("💹 PvP-нетто по игрокам"
                 + (f" — с {since_label}:" if since_label else ":"))
-        note = "<i>гифт-разбивка догружается; пока показываю чистый PvP-нетто</i>"
+        note = "<i>разбивка «забрал/слил» догружается; пока — чистый PvP-нетто</i>"
         lines = [f"<b>{head}</b>", note]
-        for _gift, net, name in cand[:limit]:
+        for _t, _b, net, name in cand[:limit]:
             sign = "+" if net >= 0 else ""
             lines.append(f"• {_html.escape(name)}: нетто {sign}{net:.0f} TON{usd(net)}")
     return "\n".join(lines)
