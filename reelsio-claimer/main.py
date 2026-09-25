@@ -2954,7 +2954,9 @@ async def run_pvp_h2h(config):
         def _auth_board():
             m = tgmrkt.TgMrkt(init_data, photo)
             m.auth()
-            return m, m.leaderboard(TOP_LEADERBOARD_SLUG)
+            pref = config.get("top_leaderboard_slug") or TOP_LEADERBOARD_SLUG
+            board, _slug = m.leaderboard_auto(pref)
+            return m, board
 
         m, board = await asyncio.to_thread(_auth_board)
         rows = tgmrkt.extract_rows(board)
@@ -3023,10 +3025,17 @@ async def fetch_and_post_top(config, session_path):
         init_data = await get_menu_webview_init_data(client, MRKT_BOT)
         photo = _mrkt_photo(init_data)
 
+        pref_slug = config.get("top_leaderboard_slug") or TOP_LEADERBOARD_SLUG
+
         def _work(state):
             m = tgmrkt.TgMrkt(init_data, photo)
             m.auth()
-            board = m.leaderboard(TOP_LEADERBOARD_SLUG)
+            # Slugs rotate each tournament — try the configured one, then
+            # auto-discover the live one so the tracker self-heals.
+            board, slug_used = m.leaderboard_auto(pref_slug)
+            if slug_used != pref_slug:
+                logger.info(f"Top: слаг сменился → '{slug_used}' "
+                            f"(поставь его в config.json: top_leaderboard_slug)")
             added = 0
             if TOP_PVP_ENABLED:
                 since = (board.get("timeRange") or {}).get("startAt") \

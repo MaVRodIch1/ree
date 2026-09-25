@@ -83,6 +83,63 @@ class TgMrkt:
         return self._get(f"/leaderboard/{slug}",
                          params={"offset": 0, "count": count, "get-finished": "false"})
 
+    def active_leaderboard_slugs(self):
+        """Best-effort discovery of the current contest's leaderboard slug(s).
+
+        Slugs rotate each tournament (e.g. playhub_hot_week → dead next contest).
+        The web app finds the live one via /team-events/active, whose events each
+        carry the leaderboard key. We dig any string that looks like a slug out of
+        that response so the tracker can self-heal when the slug changes. Returns a
+        de-duplicated list, best-guess first; empty if discovery isn't available."""
+        try:
+            data = self._get("/team-events/active")
+        except Exception:
+            return []
+        found, seen = [], set()
+
+        def want(k):
+            return any(t in k.lower() for t in
+                       ("slug", "leaderboard", "key", "code", "name", "id"))
+
+        def walk(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if isinstance(v, str) and want(k) and _looks_like_slug(v):
+                        if v not in seen:
+                            seen.add(v)
+                            found.append(v)
+                    else:
+                        walk(v)
+            elif isinstance(node, list):
+                for it in node:
+                    walk(it)
+
+        walk(data)
+        # Prefer slugs that look leaderboard-ish (contain a word separator and a
+        # known hint) over bare ids.
+        found.sort(key=lambda s: (0 if any(h in s.lower() for h in
+                   ("playhub", "hot", "week", "contest", "season", "hub")) else 1))
+        return found
+
+    def leaderboard_auto(self, preferred: str | None = None, count: int = 50):
+        """Fetch the leaderboard, healing a stale slug automatically.
+
+        Tries `preferred` first; on failure, discovers active slugs and tries
+        each. Returns (board, slug_used). Raises the last error if nothing works.
+        """
+        tried, last_err = [], None
+        candidates = ([preferred] if preferred else []) + self.active_leaderboard_slugs()
+        for slug in candidates:
+            if not slug or slug in tried:
+                continue
+            tried.append(slug)
+            try:
+                return self.leaderboard(slug, count), slug
+            except Exception as e:
+                last_err = e
+        raise RuntimeError(
+            f"no working leaderboard slug (tried {tried or 'none'}): {last_err}")
+
     # ── PvP win/loss (real net in TON) ──────────────────────────────────────
     def game_rooms(self):
         return self._get("/pvp/game-rooms")
@@ -361,6 +418,20 @@ def _h2h_ton(b):
             "opp_wins": b["opp_wins"], "other_wins": b["other_wins"],
             "a_to_b_ton": b["a_to_b"] / 1e9, "b_to_a_ton": b["b_to_a"] / 1e9,
             "my_net_ton": b["my_net"] / 1e9, "opp_net_ton": b["opp_net"] / 1e9}
+
+
+def _looks_like_slug(v: str) -> bool:
+    """A leaderboard slug is a short lowercase token like 'playhub_hot_week' — not
+    a UUID (has dashes but also digits/hex in 8-4-4-4-12 form) and not a URL."""
+    if not isinstance(v, str):
+        return False
+    s = v.strip()
+    if not (3 <= len(s) <= 64) or "/" in s or " " in s:
+        return False
+    # reject UUIDs (…-…-…-…-…, all hex)
+    if s.count("-") >= 4 and all(c in "0123456789abcdef-" for c in s.lower()):
+        return False
+    return all(c.isalnum() or c in "_-" for c in s) and any(c.isalpha() for c in s)
 
 
 def _room_ids(payload):
