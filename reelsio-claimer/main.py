@@ -315,9 +315,26 @@ def save_dead_sessions(names) -> None:
         pass
 
 
+def is_ban_error(exc: Exception) -> bool:
+    """True when an exception means the account itself is gone (banned/deleted)
+    or its authorization was killed — i.e. the session is permanently dead, not
+    a transient network hiccup. Mirrors the buckets in run_check_sessions."""
+    etype = type(exc).__name__
+    dead_markers = ("Deactivated", "UserDeactivated", "Banned",
+                    "AuthKeyUnregistered", "AuthKeyInvalid", "SessionRevoked",
+                    "UserDeactivatedBan", "Unauthorized")
+    if any(m in etype for m in dead_markers):
+        return True
+    msg = str(exc).upper()
+    return any(k in msg for k in
+               ("DEACTIVATED", "USER_DEACTIVATED", "AUTH_KEY_UNREGISTERED",
+                "SESSION_REVOKED", "USER_BANNED"))
+
+
 def mark_dead_session(label: str) -> None:
     """Add a session to the permanent skip-list. Called the moment a session
-    reports Not authorized, so subsequent cycles never queue it again."""
+    reports Not authorized (or a ban error), so subsequent cycles never queue
+    it again."""
     dead = load_dead_sessions()
     if label in dead:
         return
@@ -513,6 +530,9 @@ async def run_cycle(config: dict, mode: str):
             progress_mark("reels", window, account_label)
         except Exception as e:
             logger.error(f"[{account_label}] Connection error: {e}")
+            if is_ban_error(e):
+                mark_dead_session(account_label)
+                progress_mark("reels", window, account_label)
         finally:
             try:
                 await client.disconnect()
@@ -1032,6 +1052,8 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24, quiet=F
                     progress_mark(task, window, label)
             except Exception as e:
                 log("error", f"[{label}] error: {e}")
+                if is_ban_error(e):
+                    mark_dead_session(label)
             finally:
                 try:
                     await client.disconnect()
@@ -2260,6 +2282,8 @@ async def sixseven_cycle(config, sessions, quiet=False, pause_event=None):
                     drops[label] = specials
             except Exception as e:
                 log("error", f"[{label}] Six Seven error: {e}")
+                if is_ban_error(e):
+                    mark_dead_session(label)
             finally:
                 try:
                     await client.disconnect()
