@@ -80,3 +80,6 @@ top_daily.txt
 
 # Leaderboard PvP cache
 top_pvp_state.json
+
+# Announced-tasks memory (which task templates were already posted)
+top_tasks_seen.json

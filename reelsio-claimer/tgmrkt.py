@@ -140,6 +140,14 @@ class TgMrkt:
         raise RuntimeError(
             f"no working leaderboard slug (tried {tried or 'none'}): {last_err}")
 
+    def tasks(self):
+        """GET /tasks -> list of the contest's tasks (each carries a TaskPoint
+        reward whose `data` is the leaderboard slug and `amount` the points)."""
+        data = self._get("/tasks")
+        if isinstance(data, dict):
+            return data.get("tasks") or []
+        return data or []
+
     # ── PvP win/loss (real net in TON) ──────────────────────────────────────
     def game_rooms(self):
         return self._get("/pvp/game-rooms")

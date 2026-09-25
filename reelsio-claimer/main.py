@@ -109,8 +109,9 @@ MSK = timezone(timedelta(hours=3))    # Moscow time for display
 # Rough spend calibration: rank #2 (~330k pts) is said to be ~$800 spent.
 # → ~$0.00242 per point. Tweak here to recalibrate.
 TOP_USD_PER_POINT = 800 / 330000
-# The leaderboard slug (from /api/v1/leaderboard/<slug>). Update per contest.
-TOP_LEADERBOARD_SLUG = "playhub_hot_week"
+# The leaderboard slug (from /api/v1/leaderboard/<slug>). Rotates per contest;
+# override in config.json ("top_leaderboard_slug") or let auto-discovery heal it.
+TOP_LEADERBOARD_SLUG = "playhub_rush_week"
 # PvP win/loss: whether to compute the net (scanned from the contest start),
 # and the TON→USD rate used to show net in dollars.
 TOP_PVP_ENABLED = True
@@ -121,6 +122,9 @@ TOP_PVP_MAX_GAMES = 30000     # cap on games folded per run (covers a full conte
 TOP_PVP_STATE_FILE = BASE_DIR / "top_pvp_state.json"  # persistent PvP totals
 # Auto-post the top2-vs-top1 head-to-head each hour (off — use the menu instead).
 TOP_H2H_ENABLED = False
+# Announce newly-appeared contest tasks (new task templates) to the chat.
+TOP_TASKS_ENABLED = True
+TOP_TASKS_SEEN_FILE = BASE_DIR / "top_tasks_seen.json"  # template ids already announced
 ASTEROID_REF = "6128719325"
 ASTEROID_CHANNELS = ["asteroidshiba_p2e", "asteroidshiba_game"]
 # Temporarily disabled in combo after an anti-bot warning from the project.
@@ -2838,6 +2842,82 @@ def _save_pvp_state(state):
         pass
 
 
+def _load_tasks_seen() -> set:
+    try:
+        return set(json.loads(TOP_TASKS_SEEN_FILE.read_text(encoding="utf-8")))
+    except Exception:
+        return set()
+
+
+def _save_tasks_seen(seen: set):
+    try:
+        TOP_TASKS_SEEN_FILE.write_text(json.dumps(sorted(seen)), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _task_action(t: dict) -> str:
+    """Human (RU) one-liner for what a task asks you to do. Names/descriptions in
+    the API are i18n keys, so we derive from `link`/`type`/`name` instead."""
+    link = (t.get("link") or "").strip()
+    ttype = (t.get("type") or "").strip()
+    name = (t.get("name") or "").lower()
+    n = t.get("pointsToComplete") or 1
+    times = f" ×{n}" if isinstance(n, int) and n > 1 else ""
+    if ttype == "TelegramJoin" or (link.startswith("http") and "t.me" in link):
+        return f"подписка: {link}"
+    if link == "PvP" or "pvp" in name:
+        base = "PvP с гифт-ставкой" if "gift" in name else "сыграть в PvP"
+        return base + times
+    if link == "SquidGame" or "squid" in name:
+        return "сыграть в Squid Game" + times
+    if link:
+        return f"{link}{times}"
+    return (t.get("name") or "задание") + times
+
+
+def _task_points(t: dict) -> int:
+    for r in t.get("rewards") or []:
+        if r.get("type") == "TaskPoint":
+            try:
+                return int(float(r.get("amount") or 0))
+            except Exception:
+                return 0
+    return 0
+
+
+def _format_new_tasks(tasks: list, seen: set):
+    """Announcement for tasks whose template hasn't been announced yet.
+    Returns (text_or_None, new_keys). Dedup by templateId so the same daily task
+    isn't re-announced every cycle."""
+    import html as _html
+    fresh = []
+    for t in tasks:
+        if not t.get("isActive", True):
+            continue
+        key = t.get("templateId") or t.get("name") or t.get("id")
+        if not key or key in seen:
+            continue
+        fresh.append((key, t))
+    if not fresh:
+        return None, []
+    fresh.sort(key=lambda kt: _task_points(kt[1]), reverse=True)
+    lines = ["<b>🆕 Новые задания @mrkt</b>", "<i>очки идут в зачёт турнира</i>"]
+    for _key, t in fresh:
+        p = _task_points(t)
+        pstr = f"+{p} очков" if p else "бонус"
+        exp = ""
+        if t.get("expiresAt"):
+            try:
+                exp = " · до " + datetime.fromisoformat(
+                    t["expiresAt"].replace("Z", "+00:00")
+                ).astimezone(MSK).strftime("%d.%m %H:%M МСК")
+            except Exception:
+                exp = ""
+        lines.append(f"• {pstr} — {_html.escape(_task_action(t))}{exp}")
+    return "\n".join(lines), [k for k, _ in fresh]
+
+
 def _scores_about(history, ago_seconds, tol):
     """Score map from the snapshot closest to `ago_seconds` ago (within tol)."""
     target = time.time() - ago_seconds
@@ -3050,14 +3130,33 @@ async def fetch_and_post_top(config, session_path):
                                              max_new=TOP_PVP_MAX_GAMES)
                 except Exception as e:
                     logger.warning(f"Top: PvP накопление — {e}")
+            tasks = []
+            if TOP_TASKS_ENABLED:
+                try:
+                    tasks = m.tasks()
+                except Exception as e:
+                    logger.warning(f"Top: задания — {e}")
             rate = tgmrkt.ton_usd_rate(TON_USD)  # live TON→USD
-            return board, added, rate
+            return board, added, rate, tasks
 
         pvp_state = _load_pvp_state()
-        payload, added, rate = await asyncio.to_thread(_work, pvp_state)
+        payload, added, rate, tasks = await asyncio.to_thread(_work, pvp_state)
         rows = tgmrkt.extract_rows(payload)
         if TOP_PVP_ENABLED:
             _save_pvp_state(pvp_state)
+        # Announce newly-appeared tasks — independent of the PvP rebuild, so this
+        # runs even while the leaderboard post is still held below.
+        if TOP_TASKS_ENABLED and tasks:
+            seen = _load_tasks_seen()
+            tasks_txt, new_keys = _format_new_tasks(tasks, seen)
+            if tasks_txt:
+                try:
+                    await client.send_message(TOP_CHAT_ID, tasks_txt, parse_mode="html")
+                    seen.update(new_keys)
+                    _save_tasks_seen(seen)
+                    logger.info(f"Top: анонсировано новых заданий: {len(new_keys)}")
+                except Exception as e:
+                    logger.warning(f"Top: не отправил задания — {e}")
         # Hold the first post until the whole-contest history is built.
         rooms = pvp_state.get("rooms") or {}
         pvp_ready = bool(rooms) and all(r.get("done") for r in rooms.values())
