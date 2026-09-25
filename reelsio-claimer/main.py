@@ -92,6 +92,10 @@ def release_account(label):
 
 shutdown_event = asyncio.Event()
 
+# Set while a channel-views burst is running so the Reels cycle yields to it —
+# channel views are top priority and must not wait for farming to finish.
+views_active = asyncio.Event()
+
 ZONTIQ_BASE = "https://api.zontiq.io/api/v1"
 SPLIT_API_BASE = "https://api.split.tg"
 
@@ -446,6 +450,12 @@ async def run_cycle(config: dict, mode: str):
             break
 
         account_label = session_path.stem
+        # Channel views are top priority: if a views burst is running, pause the
+        # Reels cycle here (before claiming any account) until it finishes.
+        while views_active.is_set() and not shutdown_event.is_set():
+            await asyncio.sleep(2)
+        if shutdown_event.is_set():
+            break
         # Don't open this session if the background views drizzle holds it.
         if not await acquire_account(account_label):
             continue
@@ -905,16 +915,21 @@ async def view_channel_posts(client, account_label, channel, hours=24, quiet=Fal
 
 
 async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24, quiet=False,
-                      spread_seconds=None, pause_event=None, use_progress=True):
+                      spread_seconds=None, pause_event=None, use_progress=True,
+                      use_lock=None):
     """View recent posts of `channel` across accounts.
     spread_seconds: if set, drizzle the accounts evenly over that many seconds.
     pause_event: if set, the loop waits between accounts while this event is set
         (used to yield to the Reels cycle — views only run during the rest).
     use_progress: when False, don't gate/mark the once-a-day progress (used by
-        the post monitor, which re-runs a full pass whenever a new post drops)."""
+        the post monitor, which re-runs a full pass whenever a new post drops).
+    use_lock: force per-account locking on/off; None = auto (on when drizzling
+        or yielding). Set True to lock even at full speed so a priority burst
+        never double-opens a session the Reels cycle is on."""
     api_id, api_hash = config["api_id"], config["api_hash"]
     delay_range = config.get("delay_between_accounts_sec", [5, 30])
-    use_lock = spread_seconds is not None or pause_event is not None
+    if use_lock is None:
+        use_lock = spread_seconds is not None or pause_event is not None
 
     def log(level, msg):
         # quiet mode → this whole cycle leaves no trace in the logs
@@ -3328,15 +3343,12 @@ async def run_combo(config):
 
     async def views_monitor():
         # Continuously watch the channel; whenever a new post appears, view it
-        # across all accounts — but only during the rest from Reels (pauses
-        # whenever reels_active is set, resumes when the cycle finishes).
+        # across all accounts at full speed IMMEDIATELY — channel views are the
+        # top priority, so the Reels cycle yields to us (views_active) instead of
+        # the other way around. No rest-gating, no drizzle.
         last_id = None
         poll = VIEWS_POLL_MINUTES * 60
         while not shutdown_event.is_set():
-            # Only act while resting.
-            if reels_active.is_set():
-                await asyncio.sleep(20)
-                continue
             sessions = get_session_files()
             if not sessions:
                 await _sleep_or_stop(poll)
@@ -3346,14 +3358,18 @@ async def run_combo(config):
                 await _sleep_or_stop(poll)
                 continue
             if last_id is None or latest > last_id:
-                logger.info("Combo: новый пост — просмотры в паузе фарма")
-                # use_progress=False: react to the new post even for accounts
-                # that already viewed earlier today. pause_event yields to Reels.
-                await views_cycle(config, sessions, quiet=True,
-                                  hours=VIEWS_LOOKBACK_HOURS,
-                                  pause_event=reels_active, use_progress=False)
+                logger.info("Combo: новый пост — просмотры в приоритете (фарм ждёт)")
+                views_active.set()          # make the Reels cycle yield to us
+                try:
+                    # Full speed: no pause_event, no spread. use_lock=True so we
+                    # never double-open a session the Reels cycle is mid-account on.
+                    await views_cycle(config, sessions, quiet=True,
+                                      hours=VIEWS_LOOKBACK_HOURS,
+                                      use_progress=False, use_lock=True)
+                finally:
+                    views_active.clear()
                 last_id = latest
-                logger.info("Combo: просмотры нового поста завершены")
+                logger.info("Combo: просмотры нового поста завершены — фарм продолжается")
             await _sleep_or_stop(poll)
 
     async def _sleep_or_stop(seconds):
