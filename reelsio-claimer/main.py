@@ -3004,6 +3004,22 @@ def _free_farmers_note(rows, pnl, ton_usd, since_label="", limit=12, min_games=1
     return "\n".join(lines)
 
 
+def _format_daily(rows, day_ago, limit=15):
+    """Per-player points gained over ~24h, sorted by gain."""
+    items = []
+    for r in rows:
+        if r["id"] in day_ago:
+            items.append((r["score"] - day_ago[r["id"]], r["name"]))
+    if not items:
+        return None
+    items.sort(reverse=True)
+    lines = [f"📅 Прирост за сутки  ({datetime.now(MSK).strftime('%d.%m %H:%M МСК')})"]
+    for i, (d, name) in enumerate(items[:limit], 1):
+        val = f"+{d:,}".replace(",", " ") if d >= 0 else f"{d:,}".replace(",", " ")
+        lines.append(f"{i}. {name}: {val}")
+    return "\n".join(lines)
+
+
 def _save_top_snapshot(history, rows):
     history.append({"t": time.time(), "scores": {r["id"]: r["score"] for r in rows}})
     history = history[-48:]  # keep ~24h at 30-min cadence
