@@ -294,8 +294,46 @@ async def authorize_new_account(api_id: int, api_hash: str):
         await client.disconnect()
 
 
-def get_session_files(directory: Path = SESSIONS_DIR) -> list[Path]:
-    return sorted(directory.glob("*.session"))
+DEAD_SESSIONS_FILE = BASE_DIR / "dead_sessions.txt"
+
+
+def load_dead_sessions() -> set:
+    """Names of sessions known to be dead (Not authorized / banned). They are
+    pulled out of every farming queue so they stop wasting connect time."""
+    try:
+        return {l.strip() for l in
+                DEAD_SESSIONS_FILE.read_text(encoding="utf-8").splitlines() if l.strip()}
+    except Exception:
+        return set()
+
+
+def save_dead_sessions(names) -> None:
+    try:
+        body = "\n".join(sorted(set(names)))
+        DEAD_SESSIONS_FILE.write_text((body + "\n") if body else "", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def mark_dead_session(label: str) -> None:
+    """Add a session to the permanent skip-list. Called the moment a session
+    reports Not authorized, so subsequent cycles never queue it again."""
+    dead = load_dead_sessions()
+    if label in dead:
+        return
+    dead.add(label)
+    save_dead_sessions(dead)
+    logger.info(f"Мёртвая сессия {label} убрана из очереди (dead_sessions.txt)")
+
+
+def get_session_files(directory: Path = SESSIONS_DIR,
+                      skip_dead: bool = True) -> list[Path]:
+    files = sorted(directory.glob("*.session"))
+    if skip_dead:
+        dead = load_dead_sessions()
+        if dead:
+            files = [f for f in files if f.stem not in dead]
+    return files
 
 
 async def get_webapp_init_data(client: TelegramClient, bot_username: str) -> str:
@@ -465,6 +503,7 @@ async def run_cycle(config: dict, mode: str):
             await client.connect()
             if not await client.is_user_authorized():
                 logger.warning(f"[{account_label}] Not authorized, skipping")
+                mark_dead_session(account_label)
                 dead += 1
                 progress_mark("reels", window, account_label)
                 continue
@@ -982,6 +1021,7 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24, quiet=F
                 await client.connect()
                 if not await client.is_user_authorized():
                     log("warning", f"[{label}] Not authorized, skipping")
+                    mark_dead_session(label)
                     dead += 1
                     if use_progress:
                         progress_mark(task, window, label)
@@ -1659,12 +1699,15 @@ async def run_check_sessions(config):
     ])
     if folder is None:
         return
+    # The validator must see every session — including ones already on the
+    # dead-list — so it can re-test them and recover any that came back.
     if folder == "new":
-        files = get_session_files(NEW_SESSIONS_DIR)
+        files = get_session_files(NEW_SESSIONS_DIR, skip_dead=False)
     elif folder == "old":
-        files = get_session_files(SESSIONS_DIR)
+        files = get_session_files(SESSIONS_DIR, skip_dead=False)
     else:
-        files = get_session_files(NEW_SESSIONS_DIR) + get_session_files(SESSIONS_DIR)
+        files = (get_session_files(NEW_SESSIONS_DIR, skip_dead=False)
+                 + get_session_files(SESSIONS_DIR, skip_dead=False))
 
     if not files:
         print(f"{c['yel']}В выбранной папке нет сессий.{c['reset']}")
@@ -1716,13 +1759,19 @@ async def run_check_sessions(config):
     print(f"  {c['mag']}🚫 забанены/удалены: {len(banned)}{c['reset']}")
     print(f"  {c['dim']}⚠️  ошибки сети/др.:  {len(err)}{c['reset']}")
 
-    # Write dead session names to a file so they can be pulled out of the folder.
-    dead = not_auth + banned
-    if dead:
-        report = BASE_DIR / "dead_sessions.txt"
-        report.write_text("\n".join(dead) + "\n", encoding="utf-8")
-        print(f"\n{c['dim']}Список мёртвых сохранён в {report.name} "
-              f"({len(dead)} шт.).{c['reset']}")
+    # Update the dead-list: add newly-dead, and recover any that came back alive
+    # (so a re-authorized session re-enters the farming queues automatically).
+    dead_now = set(not_auth) | set(banned)
+    existing = load_dead_sessions()
+    updated = (existing | dead_now) - set(alive)
+    save_dead_sessions(updated)
+    recovered = existing & set(alive)
+    if dead_now:
+        print(f"\n{c['dim']}Мёртвые убраны из очереди — {DEAD_SESSIONS_FILE.name} "
+              f"(всего {len(updated)} шт.).{c['reset']}")
+    if recovered:
+        print(f"{c['grn']}Вернулись в строй: {len(recovered)} "
+              f"({', '.join(sorted(recovered))}).{c['reset']}")
 
     # Interpretation hint.
     if total and len(not_auth) == total:
@@ -1794,12 +1843,15 @@ def pick_session(title):
     if folder is None:
         return None
 
+    # Show every session here (incl. dead-listed) — manual pick may target one
+    # for inspection or re-securing.
     if folder == "new":
-        files = get_session_files(NEW_SESSIONS_DIR)
+        files = get_session_files(NEW_SESSIONS_DIR, skip_dead=False)
     elif folder == "old":
-        files = get_session_files(SESSIONS_DIR)
+        files = get_session_files(SESSIONS_DIR, skip_dead=False)
     else:
-        files = get_session_files(NEW_SESSIONS_DIR) + get_session_files(SESSIONS_DIR)
+        files = (get_session_files(NEW_SESSIONS_DIR, skip_dead=False)
+                 + get_session_files(SESSIONS_DIR, skip_dead=False))
 
     if not files:
         print(f"{c['yel']}В выбранной папке нет сессий.{c['reset']}")
@@ -2197,6 +2249,7 @@ async def sixseven_cycle(config, sessions, quiet=False, pause_event=None):
                 await client.connect()
                 if not await client.is_user_authorized():
                     log("warning", f"[{label}] Not authorized, skipping")
+                    mark_dead_session(label)
                     dead += 1
                     continue
                 alive += 1

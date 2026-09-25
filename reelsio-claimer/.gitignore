@@ -83,3 +83,6 @@ top_pvp_state.json
 
 # Announced-tasks memory (which task templates were already posted)
 top_tasks_seen.json
+
+# Dead-session skip-list (Not authorized / banned) — local, per machine
+dead_sessions.txt
