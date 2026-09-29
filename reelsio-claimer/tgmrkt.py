@@ -9,7 +9,9 @@ Leaderboard (confirmed live):
       -> {top100:[{name,position,points,picture,isMe}], me:{...}, totalPoints, timeRange}
 """
 import html as _html
+import json
 import time
+from pathlib import Path
 
 import requests
 
@@ -490,17 +492,67 @@ def _grp(n):
     return f"{n:,}".replace(",", " ")
 
 
-def ton_usd_rate(fallback=3.0):
-    """Live TON→USD price (CoinGecko), with a fallback constant."""
+_RATE_CACHE_FILE = Path(__file__).with_name("ton_rate_cache.json")
+_rate_mem = {"ts": 0.0, "usd": None}
+
+# TON→USD sources, tried in order. Coinbase works from datacenter IPs where
+# CoinGecko (Cloudflare 403) and Binance (geo-block) don't; the rest are
+# backups for when one is down.
+_TON_SOURCES = [
+    ("coinbase", "https://api.coinbase.com/v2/prices/TON-USD/spot",
+     lambda j: float(j["data"]["amount"])),
+    ("coingecko",
+     "https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd",
+     lambda j: float(j["the-open-network"]["usd"])),
+    ("okx", "https://www.okx.com/api/v5/market/ticker?instId=TON-USDT",
+     lambda j: float(j["data"][0]["last"])),
+    ("binance", "https://api.binance.com/api/v3/ticker/price?symbol=TONUSDT",
+     lambda j: float(j["price"])),
+]
+
+
+def _fetch_ton_usd():
+    for _name, url, parse in _TON_SOURCES:
+        try:
+            r = requests.get(url, headers={"User-Agent": UA,
+                                           "accept": "application/json"}, timeout=12)
+            if not r.ok:
+                continue
+            v = parse(r.json())
+            if v and v > 0:
+                return v
+        except Exception:
+            continue
+    return None
+
+
+def ton_usd_rate(fallback=3.0, max_age=300):
+    """Live TON→USD price. Tries several exchanges (Coinbase, CoinGecko, OKX,
+    Binance), caches the last good value in memory and on disk, and only uses
+    `fallback` when every source fails AND no cached rate exists — so a momentary
+    outage never silently reverts to the stub constant.
+    `max_age`: seconds the in-memory value is reused before refetching."""
+    now = time.time()
+    if _rate_mem["usd"] and now - _rate_mem["ts"] < max_age:
+        return _rate_mem["usd"]
+    v = _fetch_ton_usd()
+    if v:
+        _rate_mem.update(ts=now, usd=v)
+        try:
+            _RATE_CACHE_FILE.write_text(json.dumps({"usd": v, "ts": now}))
+        except Exception:
+            pass
+        return v
+    # Every live source failed → last good value (memory, then disk), then stub.
+    if _rate_mem["usd"]:
+        return _rate_mem["usd"]
     try:
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": "the-open-network", "vs_currencies": "usd"},
-            timeout=15)
-        v = r.json().get("the-open-network", {}).get("usd")
-        return float(v) if v else fallback
+        cached = json.loads(_RATE_CACHE_FILE.read_text())
+        if cached.get("usd"):
+            return float(cached["usd"])
     except Exception:
-        return fallback
+        pass
+    return fallback
 
 
 def format_leaderboard(rows, prev=None, usd_per_point=0.0,
