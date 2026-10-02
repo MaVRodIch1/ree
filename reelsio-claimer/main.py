@@ -1930,6 +1930,7 @@ def choose_action():
                 ("🎯 Снайпер комментариев (первый коммент)", "sniper"),
                 ("📊 Слежение за топом @mrkt (постить в чат)", "top_tracker"),
                 ("🎯 PvP 1-на-1: я против игрока", "pvp_h2h"),
+                ("📊 H2H в чат: lastexiler vs топ-1 (без вопросов)", "h2h_chat"),
             ])
             if sub:
                 return sub
@@ -3198,6 +3199,74 @@ async def run_pvp_h2h(config):
             pass
 
 
+async def run_h2h_to_chat(config):
+    """One-tap: lastexiler vs the current top-1, posted straight to the chat — no
+    prompts. Auto-picks the first working @mrkt session and resolves top-1 from
+    the live (or just-finished) leaderboard."""
+    c = _C
+    print(f"\n{c['cyan']}{c['bold']}📊 H2H в чат: "
+          f"{config.get('top_h2h_player') or TOP_H2H_PLAYER} vs топ-1{c['reset']}")
+    import tgmrkt
+    api_id, api_hash = int(config["api_id"]), str(config["api_hash"])
+    player = config.get("top_h2h_player") or TOP_H2H_PLAYER
+    sessions = get_session_files(SESSIONS_DIR) + get_session_files(NEW_SESSIONS_DIR)
+    if not sessions:
+        print(f"{c['yel']}Нет живых сессий.{c['reset']}")
+        return
+    for session_path in sessions:
+        label = session_path.stem
+        client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash)
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                continue
+            init_data = await get_menu_webview_init_data(client, MRKT_BOT)
+            photo = _mrkt_photo(init_data)
+
+            def _work():
+                m = tgmrkt.TgMrkt(init_data, photo)
+                m.auth()
+                pref = config.get("top_leaderboard_slug") or TOP_LEADERBOARD_SLUG
+                board = None
+                try:
+                    board, _slug = m.leaderboard_auto(pref)
+                except Exception:
+                    board = None
+                rows = tgmrkt.extract_rows(board) if board else []
+                opp = (rows[0]["name"] if rows else "") or config.get("top_h2h_opponent") or ""
+                since = (board.get("timeRange") or {}).get("startAt") \
+                    if isinstance(board, dict) else None
+                if not since:
+                    since = config.get("top_contest_start")
+                if not opp:
+                    return None, None, None
+                h = m.pvp_head_to_head(player, opp, since, deadline_s=TOP_H2H_DEADLINE)
+                return h, opp, tgmrkt.ton_usd_rate(TON_USD)
+
+            print(f"{c['dim']}Сессия {label}: считаю игры {player} vs топ-1… "
+                  f"(может занять минуту){c['reset']}")
+            h, opp, rate = await asyncio.to_thread(_work)
+            if h is None:
+                print(f"{c['yel']}Не удалось определить топ-1 (лидерборд недоступен). "
+                      f"Впиши ник в config.json → top_h2h_opponent или используй "
+                      f"пункт «PvP 1-на-1».{c['reset']}")
+                return
+            text = _format_h2h(h, rate)
+            print(text)
+            await client.send_message(TOP_CHAT_ID, text)
+            print(f"{c['grn']}Отправлено в чат ({player} vs {opp}).{c['reset']}")
+            return
+        except Exception as e:
+            print(f"{c['dim']}[{label}] не вышло: {e}{c['reset']}")
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+    print(f"{c['yel']}Ни одна сессия не сработала.{c['reset']}")
+
+
 def _format_h2h(h, ton_usd=0.0):
     a, b = h["me"], h["opp"]
 
@@ -3649,6 +3718,9 @@ async def main():
             return
         if action == "pvp_h2h":
             await run_pvp_h2h(config)
+            return
+        if action == "h2h_chat":
+            await run_h2h_to_chat(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
