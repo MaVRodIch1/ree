@@ -81,9 +81,10 @@ class TgMrkt:
             raise RuntimeError(f"POST {path} {r.status_code}: {r.text[:200]}")
         return r.json()
 
-    def leaderboard(self, slug: str, count: int = 50):
+    def leaderboard(self, slug: str, count: int = 50, get_finished: bool = False):
         return self._get(f"/leaderboard/{slug}",
-                         params={"offset": 0, "count": count, "get-finished": "false"})
+                         params={"offset": 0, "count": count,
+                                 "get-finished": "true" if get_finished else "false"})
 
     def active_leaderboard_slugs(self):
         """Best-effort discovery of the current contest's leaderboard slug(s).
@@ -145,32 +146,37 @@ class TgMrkt:
     def leaderboard_auto(self, preferred: str | None = None, count: int = 50):
         """Fetch the leaderboard, healing a stale slug automatically.
 
-        Order: the preferred (configured) slug first; only if it fails do we
-        discover — via /tasks (most reliable: TaskPoint.data is the live slug),
-        then /team-events/active. Returns (board, slug_used). Raises the last
-        error if nothing works."""
-        tried, last_err = [], None
+        Pass 1 tries live boards (get-finished=false): the configured slug, then
+        /tasks (TaskPoint.data is the live slug), then /team-events/active.
+        Pass 2 repeats with get-finished=true so a just-ENDED tournament's final
+        standings are still recovered during the gap before the next one starts.
+        Returns (board, slug_used). Raises the last error if nothing works."""
+        tried, last_err, disc = [], None, None
 
-        def attempt(slug):
+        def attempt(slug, finished):
             nonlocal last_err
-            if not slug or slug in tried:
+            key = (slug, finished)
+            if not slug or key in tried:
                 return None
-            tried.append(slug)
+            tried.append(key)
             try:
-                return self.leaderboard(slug, count), slug
+                return self.leaderboard(slug, count, finished), slug
             except Exception as e:
                 last_err = e
                 return None
 
-        got = attempt(preferred)
-        if got:
-            return got
-        for slug in self.slug_from_tasks() + self.active_leaderboard_slugs():
-            got = attempt(slug)
+        for finished in (False, True):
+            got = attempt(preferred, finished)
             if got:
                 return got
+            if disc is None:
+                disc = self.slug_from_tasks() + self.active_leaderboard_slugs()
+            for slug in disc:
+                got = attempt(slug, finished)
+                if got:
+                    return got
         raise RuntimeError(
-            f"no working leaderboard slug (tried {tried or 'none'}): {last_err}")
+            f"no working leaderboard slug (tried {[s for s, _ in tried] or 'none'}): {last_err}")
 
     def tasks(self):
         """GET /tasks -> list of the contest's tasks (each carries a TaskPoint
