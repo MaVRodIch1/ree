@@ -247,8 +247,8 @@ class TgMrkt:
         return self.scan_pvp(since_iso, None, max_games)[0]
 
     def pvp_head_to_head(self, me: str, opp: str, since_iso: str | None = None,
-                         max_games: int = 20000):
-        return self.scan_pvp(since_iso, (me, opp), max_games)[1]
+                         max_games: int = 20000, deadline_s: float | None = None):
+        return self.scan_pvp(since_iso, (me, opp), max_games, deadline_s)[1]
 
     def accumulate_pvp(self, state: dict, since_iso: str | None = None,
                        deadline_s: float = 60, max_new: int = 8000) -> int:

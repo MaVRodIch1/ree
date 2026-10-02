@@ -126,6 +126,12 @@ TOP_PVP_MAX_GAMES = 30000     # cap on games folded per run (covers a full conte
 TOP_PVP_STATE_FILE = BASE_DIR / "top_pvp_state.json"  # persistent PvP totals
 # Auto-post the top2-vs-top1 head-to-head each hour (off — use the menu instead).
 TOP_H2H_ENABLED = False
+# Once-a-day head-to-head of a specific player vs the current top-1, posted to
+# the chat ("my games vs top1"). Not hourly — just one recap per day.
+TOP_H2H_AUTO = True
+TOP_H2H_PLAYER = "lastexiler"   # whose games-vs-top1 to post (override in config.json)
+TOP_H2H_DEADLINE = 300          # seconds budget for the daily H2H scan
+TOP_H2H_DAILY_FILE = BASE_DIR / "top_h2h_daily.txt"  # last date the H2H was posted
 # Announce newly-appeared contest tasks (new task templates) to the chat.
 TOP_TASKS_ENABLED = True
 TOP_TASKS_SEEN_FILE = BASE_DIR / "top_tasks_seen.json"  # template ids already announced
@@ -3150,9 +3156,12 @@ async def run_pvp_h2h(config):
         rows = tgmrkt.extract_rows(board)
         top1 = rows[0]["name"] if rows else ""
         top2 = rows[1]["name"] if len(rows) > 1 else ""
+        # Default player A to "my player" (config / constant) so Enter→Enter
+        # gives exactly "<my player> vs top1".
+        my_player = config.get("top_h2h_player") or TOP_H2H_PLAYER or top2
         print(f"{c['dim']}Топ-1: {top1} · Топ-2: {top2}. "
               f"Можно ввести любые ники.{c['reset']}")
-        a = input(f"Игрок A (Enter — {top2}): ").strip() or top2
+        a = input(f"Игрок A (Enter — {my_player}): ").strip() or my_player
         b = input(f"Игрок B (Enter — {top1}): ").strip() or top1
         if not a or not b:
             print(f"{c['yel']}Нужны оба ника.{c['reset']}")
@@ -3312,6 +3321,36 @@ async def fetch_and_post_top(config, session_path):
                     TOP_DAILY_FILE.write_text(today, encoding="utf-8")
                 except Exception:
                     pass
+        # Once a day: "my games vs top1" head-to-head (not hourly — that 1v2
+        # spam was turned off). Posts <my player> vs the current top-1.
+        h2h_player = config.get("top_h2h_player") or TOP_H2H_PLAYER
+        if TOP_H2H_AUTO and h2h_player and rows:
+            last_h2h = ""
+            try:
+                last_h2h = TOP_H2H_DAILY_FILE.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
+            top1 = rows[0]["name"]
+            if today != last_h2h and h2h_player.lower() != top1.lower():
+                since_iso = (payload.get("timeRange") or {}).get("startAt") \
+                    if isinstance(payload, dict) else None
+
+                def _h2h_work():
+                    mm = tgmrkt.TgMrkt(init_data, photo)
+                    mm.auth()
+                    return mm.pvp_head_to_head(h2h_player, top1, since_iso,
+                                               deadline_s=TOP_H2H_DEADLINE)
+                try:
+                    h = await asyncio.to_thread(_h2h_work)
+                    await client.send_message(TOP_CHAT_ID, _format_h2h(h, rate))
+                    try:
+                        TOP_H2H_DAILY_FILE.write_text(today, encoding="utf-8")
+                    except Exception:
+                        pass
+                    logger.info(f"Top: H2H {h2h_player} vs {top1} запостен "
+                                f"({h.get('scanned', 0)} игр просканировано)")
+                except Exception as e:
+                    logger.warning(f"Top: H2H — {e}")
         _save_top_snapshot(history, rows)
         done_rooms = sum(1 for r in (pvp_state.get("rooms") or {}).values() if r.get("done"))
         total_rooms = len(pvp_state.get("rooms") or {})
