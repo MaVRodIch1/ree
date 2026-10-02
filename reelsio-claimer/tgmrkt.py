@@ -123,22 +123,52 @@ class TgMrkt:
                    ("playhub", "hot", "week", "contest", "season", "hub")) else 1))
         return found
 
+    def slug_from_tasks(self):
+        """Most reliable slug discovery: every task's TaskPoint reward carries
+        `data` = the current contest's leaderboard slug (e.g. 'playhub_rush_week').
+        /tasks stays reachable even when /team-events/active is forbidden, so this
+        is the primary self-heal path when the slug rotates."""
+        try:
+            tasks = self.tasks()
+        except Exception:
+            return []
+        found, seen = [], set()
+        for t in tasks:
+            for r in (t.get("rewards") or []):
+                if r.get("type") == "TaskPoint":
+                    d = r.get("data")
+                    if isinstance(d, str) and _looks_like_slug(d) and d not in seen:
+                        seen.add(d)
+                        found.append(d)
+        return found
+
     def leaderboard_auto(self, preferred: str | None = None, count: int = 50):
         """Fetch the leaderboard, healing a stale slug automatically.
 
-        Tries `preferred` first; on failure, discovers active slugs and tries
-        each. Returns (board, slug_used). Raises the last error if nothing works.
-        """
+        Order: the preferred (configured) slug first; only if it fails do we
+        discover — via /tasks (most reliable: TaskPoint.data is the live slug),
+        then /team-events/active. Returns (board, slug_used). Raises the last
+        error if nothing works."""
         tried, last_err = [], None
-        candidates = ([preferred] if preferred else []) + self.active_leaderboard_slugs()
-        for slug in candidates:
+
+        def attempt(slug):
+            nonlocal last_err
             if not slug or slug in tried:
-                continue
+                return None
             tried.append(slug)
             try:
                 return self.leaderboard(slug, count), slug
             except Exception as e:
                 last_err = e
+                return None
+
+        got = attempt(preferred)
+        if got:
+            return got
+        for slug in self.slug_from_tasks() + self.active_leaderboard_slugs():
+            got = attempt(slug)
+            if got:
+                return got
         raise RuntimeError(
             f"no working leaderboard slug (tried {tried or 'none'}): {last_err}")
 
