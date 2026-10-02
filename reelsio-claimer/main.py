@@ -3148,26 +3148,41 @@ async def run_pvp_h2h(config):
         def _auth_board():
             m = tgmrkt.TgMrkt(init_data, photo)
             m.auth()
+            # The leaderboard only supplies top-1's name + the contest start.
+            # H2H itself (pvp game-rooms/history) doesn't need it, so don't let a
+            # dead slug block the stat — fall back to no board.
             pref = config.get("top_leaderboard_slug") or TOP_LEADERBOARD_SLUG
-            board, _slug = m.leaderboard_auto(pref)
+            try:
+                board, _slug = m.leaderboard_auto(pref)
+            except Exception:
+                board = None
             return m, board
 
         m, board = await asyncio.to_thread(_auth_board)
-        rows = tgmrkt.extract_rows(board)
+        rows = tgmrkt.extract_rows(board) if board else []
         top1 = rows[0]["name"] if rows else ""
         top2 = rows[1]["name"] if len(rows) > 1 else ""
         # Default player A to "my player" (config / constant) so Enter→Enter
         # gives exactly "<my player> vs top1".
         my_player = config.get("top_h2h_player") or TOP_H2H_PLAYER or top2
-        print(f"{c['dim']}Топ-1: {top1} · Топ-2: {top2}. "
-              f"Можно ввести любые ники.{c['reset']}")
-        a = input(f"Игрок A (Enter — {my_player}): ").strip() or my_player
-        b = input(f"Игрок B (Enter — {top1}): ").strip() or top1
+        opp_default = top1 or config.get("top_h2h_opponent") or ""
+        if top1 or top2:
+            print(f"{c['dim']}Топ-1: {top1} · Топ-2: {top2}. "
+                  f"Можно ввести любые ники.{c['reset']}")
+        else:
+            print(f"{c['yel']}Лидерборд недоступен (слаг турнира сменился) — "
+                  f"введи ники вручную.{c['reset']}")
+        a = input(f"Игрок A (Enter — {my_player or '—'}): ").strip() or my_player
+        b = input(f"Игрок B (Enter — {opp_default or '—'}): ").strip() or opp_default
         if not a or not b:
             print(f"{c['yel']}Нужны оба ника.{c['reset']}")
             return
-        since = (board.get("timeRange") or {}).get("startAt") if isinstance(board, dict) else None
-        print(f"{c['dim']}Считаю историю игр {a} vs {b}… (может занять минуту){c['reset']}")
+        since = (board.get("timeRange") or {}).get("startAt") \
+            if isinstance(board, dict) else None
+        if not since:
+            since = config.get("top_contest_start")  # optional ISO fallback
+        scope = "с начала турнира" if since else "за всю историю PvP"
+        print(f"{c['dim']}Считаю игры {a} vs {b} ({scope})… (может занять минуту){c['reset']}")
         h = await asyncio.to_thread(m.pvp_head_to_head, a, b, since)
         text = _format_h2h(h, await asyncio.to_thread(tgmrkt.ton_usd_rate, TON_USD))
         print(text)
@@ -3228,13 +3243,19 @@ async def fetch_and_post_top(config, session_path):
             m = tgmrkt.TgMrkt(init_data, photo)
             m.auth()
             # Slugs rotate each tournament — try the configured one, then
-            # auto-discover the live one so the tracker self-heals.
-            board, slug_used = m.leaderboard_auto(pref_slug)
-            if slug_used != pref_slug:
-                logger.info(f"Top: слаг сменился → '{slug_used}' "
-                            f"(поставь его в config.json: top_leaderboard_slug)")
+            # auto-discover the live one so the tracker self-heals. A dead slug
+            # must NOT kill the whole run: tasks + H2H don't need the board.
+            board = None
+            try:
+                board, slug_used = m.leaderboard_auto(pref_slug)
+                if slug_used != pref_slug:
+                    logger.info(f"Top: слаг сменился → '{slug_used}' "
+                                f"(поставь его в config.json: top_leaderboard_slug)")
+            except Exception as e:
+                logger.warning(f"Top: лидерборд недоступен ({e}) — "
+                               f"только задания и H2H")
             added = 0
-            if TOP_PVP_ENABLED:
+            if TOP_PVP_ENABLED and board is not None:
                 since = (board.get("timeRange") or {}).get("startAt") \
                     if isinstance(board, dict) else None
                 rooms = state.get("rooms") or {}
@@ -3258,7 +3279,7 @@ async def fetch_and_post_top(config, session_path):
 
         pvp_state = _load_pvp_state()
         payload, added, rate, tasks = await asyncio.to_thread(_work, pvp_state)
-        rows = tgmrkt.extract_rows(payload)
+        rows = tgmrkt.extract_rows(payload) if payload else []
         if TOP_PVP_ENABLED:
             _save_pvp_state(pvp_state)
         # Announce newly-appeared tasks — independent of the PvP rebuild, so this
@@ -3274,71 +3295,82 @@ async def fetch_and_post_top(config, session_path):
                     logger.info(f"Top: анонсировано новых заданий: {len(new_keys)}")
                 except Exception as e:
                     logger.warning(f"Top: не отправил задания — {e}")
-        # Hold the first post until the whole-contest history is built.
-        rooms = pvp_state.get("rooms") or {}
-        pvp_ready = bool(rooms) and all(r.get("done") for r in rooms.values())
-        if TOP_PVP_ENABLED and not pvp_ready:
-            done = sum(1 for r in rooms.values() if r.get("done"))
-            logger.info(f"Top: обсчитываю историю с начала турнира "
-                        f"({done}/{len(rooms)} комнат, +{added} игр) — пост позже")
-            return
-        pnl = tgmrkt.pnl_from_state(pvp_state) if TOP_PVP_ENABLED else None
-
-        history = _load_top_history()
-        prev = _scores_about_1h_ago(history)
-        stamp = datetime.now(MSK).strftime("%d.%m %H:%M МСК")
-        text = tgmrkt.format_leaderboard(
-            rows, prev, TOP_USD_PER_POINT,
-            title=f"🏆 PlayHub — Топ 50  ({stamp}, TON ${rate:.2f})",
-            pnl=pnl, ton_usd=rate)
-        if pnl:
-            text += "\n" + _pvp_coverage_note(payload, pvp_state)
-            since = (payload.get("timeRange") or {}).get("startAt") \
-                if isinstance(payload, dict) else None
-            since_label = ""
-            if since:
-                try:
-                    since_label = datetime.fromisoformat(
-                        since.replace("Z", "+00:00")).astimezone(MSK).strftime("%d.%m")
-                except Exception:
-                    since_label = ""
-            free = _free_farmers_note(rows, pnl, rate, since_label)
-            if free:
-                text += "\n" + free
-        await client.send_message(TOP_CHAT_ID, text, parse_mode="html")
-        # Once a day: a "gained over 24h" recap, sorted by gain.
+        # Leaderboard post + daily recap — only when the board is available.
         today = datetime.now(MSK).strftime("%Y-%m-%d")
-        last_daily = ""
-        try:
-            last_daily = TOP_DAILY_FILE.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
-        if today != last_daily:
-            daily_txt = _format_daily(rows, _scores_about(history, 86400, 7200))
-            if daily_txt:
-                await client.send_message(TOP_CHAT_ID, daily_txt)
+        if payload and rows:
+            # Hold the first post until the whole-contest history is built.
+            rooms = pvp_state.get("rooms") or {}
+            pvp_ready = bool(rooms) and all(r.get("done") for r in rooms.values())
+            if TOP_PVP_ENABLED and not pvp_ready:
+                done = sum(1 for r in rooms.values() if r.get("done"))
+                logger.info(f"Top: обсчитываю историю с начала турнира "
+                            f"({done}/{len(rooms)} комнат, +{added} игр) — пост позже")
+            else:
+                pnl = tgmrkt.pnl_from_state(pvp_state) if TOP_PVP_ENABLED else None
+                history = _load_top_history()
+                prev = _scores_about_1h_ago(history)
+                stamp = datetime.now(MSK).strftime("%d.%m %H:%M МСК")
+                text = tgmrkt.format_leaderboard(
+                    rows, prev, TOP_USD_PER_POINT,
+                    title=f"🏆 PlayHub — Топ 50  ({stamp}, TON ${rate:.2f})",
+                    pnl=pnl, ton_usd=rate)
+                if pnl:
+                    text += "\n" + _pvp_coverage_note(payload, pvp_state)
+                    since = (payload.get("timeRange") or {}).get("startAt") \
+                        if isinstance(payload, dict) else None
+                    since_label = ""
+                    if since:
+                        try:
+                            since_label = datetime.fromisoformat(
+                                since.replace("Z", "+00:00")).astimezone(MSK).strftime("%d.%m")
+                        except Exception:
+                            since_label = ""
+                    free = _free_farmers_note(rows, pnl, rate, since_label)
+                    if free:
+                        text += "\n" + free
+                await client.send_message(TOP_CHAT_ID, text, parse_mode="html")
+                # Once a day: a "gained over 24h" recap, sorted by gain.
+                last_daily = ""
                 try:
-                    TOP_DAILY_FILE.write_text(today, encoding="utf-8")
+                    last_daily = TOP_DAILY_FILE.read_text(encoding="utf-8").strip()
                 except Exception:
                     pass
-        # Once a day: "my games vs top1" head-to-head (not hourly — that 1v2
-        # spam was turned off). Posts <my player> vs the current top-1.
+                if today != last_daily:
+                    daily_txt = _format_daily(rows, _scores_about(history, 86400, 7200))
+                    if daily_txt:
+                        await client.send_message(TOP_CHAT_ID, daily_txt)
+                        try:
+                            TOP_DAILY_FILE.write_text(today, encoding="utf-8")
+                        except Exception:
+                            pass
+                _save_top_snapshot(history, rows)
+                done_rooms = sum(1 for r in (pvp_state.get("rooms") or {}).values() if r.get("done"))
+                total_rooms = len(pvp_state.get("rooms") or {})
+                logger.info(f"Top: запощено ({len(rows)} мест; PvP игроков "
+                            f"{len(pnl) if pnl else 0}, +{added} новых игр, "
+                            f"история {done_rooms}/{total_rooms} комнат готово)")
+
+        # Once a day: "my games vs top1" head-to-head. Runs even when the
+        # leaderboard is down — opponent = current top-1 if known, else the
+        # configured nickname (config.json: top_h2h_opponent).
         h2h_player = config.get("top_h2h_player") or TOP_H2H_PLAYER
-        if TOP_H2H_AUTO and h2h_player and rows:
+        opponent = rows[0]["name"] if rows else (config.get("top_h2h_opponent") or "")
+        if TOP_H2H_AUTO and h2h_player and opponent:
             last_h2h = ""
             try:
                 last_h2h = TOP_H2H_DAILY_FILE.read_text(encoding="utf-8").strip()
             except Exception:
                 pass
-            top1 = rows[0]["name"]
-            if today != last_h2h and h2h_player.lower() != top1.lower():
+            if today != last_h2h and h2h_player.lower() != opponent.lower():
                 since_iso = (payload.get("timeRange") or {}).get("startAt") \
                     if isinstance(payload, dict) else None
+                if not since_iso:
+                    since_iso = config.get("top_contest_start")  # optional ISO
 
                 def _h2h_work():
                     mm = tgmrkt.TgMrkt(init_data, photo)
                     mm.auth()
-                    return mm.pvp_head_to_head(h2h_player, top1, since_iso,
+                    return mm.pvp_head_to_head(h2h_player, opponent, since_iso,
                                                deadline_s=TOP_H2H_DEADLINE)
                 try:
                     h = await asyncio.to_thread(_h2h_work)
@@ -3347,16 +3379,10 @@ async def fetch_and_post_top(config, session_path):
                         TOP_H2H_DAILY_FILE.write_text(today, encoding="utf-8")
                     except Exception:
                         pass
-                    logger.info(f"Top: H2H {h2h_player} vs {top1} запостен "
+                    logger.info(f"Top: H2H {h2h_player} vs {opponent} запостен "
                                 f"({h.get('scanned', 0)} игр просканировано)")
                 except Exception as e:
                     logger.warning(f"Top: H2H — {e}")
-        _save_top_snapshot(history, rows)
-        done_rooms = sum(1 for r in (pvp_state.get("rooms") or {}).values() if r.get("done"))
-        total_rooms = len(pvp_state.get("rooms") or {})
-        logger.info(f"Top: запощено ({len(rows)} мест; PvP игроков "
-                    f"{len(pnl) if pnl else 0}, +{added} новых игр, "
-                    f"история {done_rooms}/{total_rooms} комнат готово)")
     except Exception as e:
         logger.error(f"Top: ошибка — {e}")
     finally:
