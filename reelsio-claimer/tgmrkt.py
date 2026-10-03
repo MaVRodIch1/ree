@@ -287,17 +287,12 @@ class TgMrkt:
         return self.scan_pvp(since_iso, (me, opp), max_games, deadline_s)[1]
 
     def accumulate_pvp(self, state: dict, since_iso: str | None = None,
-                       deadline_s: float = 60, max_new: int = 8000,
-                       h2h_pair=None) -> int:
+                       deadline_s: float = 60, max_new: int = 8000) -> int:
         """Incrementally fold PvP history into a persistent `state`, counting
         each game exactly once. Per room we remember the counted id band
         [low, high]: new games (id>high) are added every run; older games
         (id<low) are backfilled a bit each run until `since_iso`. This keeps
-        totals monotonic and fast (no full re-scan). Returns games added.
-
-        h2h_pair=(a, b): also fold the head-to-head for that fixed pair into
-        state['h2h'] as games are counted, so a per-pair comparison is available
-        every cycle with no extra scan."""
+        totals monotonic and fast (no full re-scan). Returns games added."""
         started = time.time()
         # Auto-heal older cache files: if the record layout changed, drop the
         # aggregates and re-scan the whole contest cleanly (the caller holds the
@@ -306,7 +301,6 @@ class TgMrkt:
         if state.get("v") != PVP_STATE_VERSION:
             state["players"] = {}
             state["rooms"] = {}
-            state.pop("h2h", None)   # H2H rides on the same counted games
             state["v"] = PVP_STATE_VERSION
         players = state.setdefault("players", {})  # name -> record (see layout above)
         # Belt-and-suspenders: pad any short record so no index ever IndexErrors.
@@ -319,18 +313,6 @@ class TgMrkt:
             while len(r) < PVP_RECORD_LEN:
                 r.append(0)
             return r
-
-        # H2H buckets for a fixed pair, folded alongside the counted games. Reset
-        # if the pair changed (otherwise old totals would mix in).
-        h2h_overall = h2h_duel = None
-        if h2h_pair:
-            a_name, b_name = h2h_pair
-            hs = state.get("h2h")
-            if not hs or hs.get("pair") != [a_name, b_name]:
-                hs = {"pair": [a_name, b_name], "overall": _blank_h2h(),
-                      "duel": _blank_h2h(), "scanned": 0}
-                state["h2h"] = hs
-            h2h_overall, h2h_duel = hs["overall"], hs["duel"]
 
         rooms_state = state.setdefault("rooms", {})
         try:
@@ -372,21 +354,6 @@ class TgMrkt:
                 # Value actually taken FROM OPPONENTS (own returned stake excluded).
                 w[4] += max(0, gift_pot - win_gift_bet)
                 w[5] += max(0, ton_pot - win_ton_bet)
-            # Fold the fixed-pair head-to-head for this same game.
-            if h2h_overall is not None:
-                cmap = {}
-                for p in parts:
-                    nm = p.get("publicName")
-                    if nm in (a_name, b_name):
-                        cmap[nm] = (p.get("totalBetNanoTONs") or 0) + \
-                                   (p.get("totalGiftBetsPrice") or 0)
-                if a_name in cmap and b_name in cmap:
-                    _acc_h2h(h2h_overall, a_name, b_name, wname, pot,
-                             cmap[a_name], cmap[b_name])
-                    state["h2h"]["scanned"] += 1
-                    if len(parts) == 2:
-                        _acc_h2h(h2h_duel, a_name, b_name, wname, pot,
-                                 cmap[a_name], cmap[b_name])
 
         for rid in rooms:
             rs = rooms_state.setdefault(rid, {"high": 0, "low": None, "done": False})
@@ -497,17 +464,6 @@ def _h2h_ton(b):
             "opp_wins": b["opp_wins"], "other_wins": b["other_wins"],
             "a_to_b_ton": b["a_to_b"] / 1e9, "b_to_a_ton": b["b_to_a"] / 1e9,
             "my_net_ton": b["my_net"] / 1e9, "opp_net_ton": b["opp_net"] / 1e9}
-
-
-def h2h_from_state(state: dict):
-    """Read the fixed-pair head-to-head folded by accumulate_pvp, in the same
-    shape pvp_head_to_head returns. None if no pair was accumulated yet."""
-    hs = state.get("h2h")
-    if not hs or not hs.get("overall"):
-        return None
-    pair = hs.get("pair") or ["", ""]
-    return {"me": pair[0], "opp": pair[1], "scanned": hs.get("scanned", 0),
-            "overall": _h2h_ton(hs["overall"]), "duel": _h2h_ton(hs["duel"])}
 
 
 def _looks_like_slug(v: str) -> bool:

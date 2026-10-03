@@ -134,7 +134,8 @@ TOP_H2H_PLAYER = "lastexiler"   # whose games to compare (override in config.jso
 # so the comparison is a specific pair (e.g. lastexiler vs xoka_tg). Empty ("")
 # falls back to the current top-1. Override in config.json: top_h2h_opponent.
 TOP_H2H_OPPONENT = "xoka_tg"
-TOP_H2H_DEADLINE = 300          # seconds budget for the manual H2H scan
+TOP_H2H_DEADLINE = 300          # seconds budget for the H2H scan
+TOP_H2H_SIG_FILE = BASE_DIR / "top_h2h_sig.txt"  # signature of last posted H2H
 # Announce newly-appeared contest tasks (new task templates) to the chat.
 TOP_TASKS_ENABLED = True
 TOP_TASKS_SEEN_FILE = BASE_DIR / "top_tasks_seen.json"  # template ids already announced
@@ -3136,6 +3137,20 @@ def _h2h_opponent(config, top1=""):
     return config.get("top_h2h_opponent") or TOP_H2H_OPPONENT or top1
 
 
+def _load_h2h_sig() -> str:
+    try:
+        return TOP_H2H_SIG_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _save_h2h_sig(sig: str):
+    try:
+        TOP_H2H_SIG_FILE.write_text(sig, encoding="utf-8")
+    except Exception:
+        pass
+
+
 async def run_pvp_h2h(config):
     c = _C
     print(f"\n{c['cyan']}{c['bold']}🎯 PvP 1-на-1: ты против игрока{c['reset']}")
@@ -3272,18 +3287,9 @@ async def fetch_and_post_top(config, session_path):
                 # incremental budget afterwards.
                 complete = bool(rooms) and all(r.get("done") for r in rooms.values())
                 dl = TOP_PVP_DEADLINE if complete else TOP_PVP_BASELINE_DEADLINE
-                # Fold the fixed-pair H2H (lastexiler vs xoka_tg) into the same
-                # pass, so it's available every cycle with no extra scan.
-                h2h_player = config.get("top_h2h_player") or TOP_H2H_PLAYER
-                b_rows = tgmrkt.extract_rows(board)
-                h2h_opp = _h2h_opponent(config, b_rows[0]["name"] if b_rows else "")
-                pair = None
-                if (TOP_H2H_AUTO and h2h_player and h2h_opp
-                        and h2h_player.lower() != h2h_opp.lower()):
-                    pair = (h2h_player, h2h_opp)
                 try:
                     added = m.accumulate_pvp(state, since, deadline_s=dl,
-                                             max_new=TOP_PVP_MAX_GAMES, h2h_pair=pair)
+                                             max_new=TOP_PVP_MAX_GAMES)
                 except Exception as e:
                     logger.warning(f"Top: PvP накопление — {e}")
             tasks = []
@@ -3368,24 +3374,42 @@ async def fetch_and_post_top(config, session_path):
                             f"{len(pnl) if pnl else 0}, +{added} новых игр, "
                             f"история {done_rooms}/{total_rooms} комнат готово)")
 
-        # H2H (lastexiler vs xoka_tg) — folded into the PvP pass above, so it's
-        # free to post here. Post it whenever the pair's game count changes (on
-        # first availability and after new games between them), not identical
-        # repeats every hour.
+        # H2H (lastexiler vs xoka_tg) — a direct scan each cycle so it works even
+        # when the contest history was already built before this pair was set.
+        # Posted only when the numbers changed (first time + after new games), so
+        # no identical repeats every hour. Runs after the top post, so it never
+        # delays it. Opponent is fixed (config/constant), so no board needed.
         if TOP_H2H_AUTO:
-            h = tgmrkt.h2h_from_state(pvp_state)
-            if h and h["overall"]["games"] > 0:
-                hs = pvp_state.get("h2h") or {}
-                g = h["overall"]["games"]
-                if g != hs.get("posted_games"):
-                    try:
-                        await client.send_message(TOP_CHAT_ID, _format_h2h(h, rate))
-                        hs["posted_games"] = g
-                        _save_pvp_state(pvp_state)
-                        logger.info(f"Top: H2H {h['me']} vs {h['opp']} запостен "
-                                    f"({g} совместных игр)")
-                    except Exception as e:
-                        logger.warning(f"Top: H2H — {e}")
+            h2h_player = config.get("top_h2h_player") or TOP_H2H_PLAYER
+            opponent = _h2h_opponent(config, rows[0]["name"] if rows else "")
+            if h2h_player and opponent and h2h_player.lower() != opponent.lower():
+                since_iso = (payload.get("timeRange") or {}).get("startAt") \
+                    if isinstance(payload, dict) else None
+                if not since_iso:
+                    since_iso = config.get("top_contest_start")
+
+                def _h2h_scan():
+                    mm = tgmrkt.TgMrkt(init_data, photo)
+                    mm.auth()
+                    return mm.pvp_head_to_head(h2h_player, opponent, since_iso,
+                                               deadline_s=TOP_H2H_DEADLINE)
+                try:
+                    h = await asyncio.to_thread(_h2h_scan)
+                    o, d = h["overall"], h["duel"]
+                    if o["games"] > 0:
+                        # Signature from TON figures only (not USD) so a price
+                        # tick alone doesn't trigger a repost.
+                        sig = json.dumps([o["games"], o["my_wins"], o["opp_wins"],
+                                          round(o["my_net_ton"], 1),
+                                          d["games"], d["my_wins"], d["opp_wins"]],
+                                         sort_keys=True)
+                        if sig != _load_h2h_sig():
+                            await client.send_message(TOP_CHAT_ID, _format_h2h(h, rate))
+                            _save_h2h_sig(sig)
+                            logger.info(f"Top: H2H {h2h_player} vs {opponent} "
+                                        f"запостен ({o['games']} совместных игр)")
+                except Exception as e:
+                    logger.warning(f"Top: H2H — {e}")
     except Exception as e:
         logger.error(f"Top: ошибка — {e}")
     finally:
