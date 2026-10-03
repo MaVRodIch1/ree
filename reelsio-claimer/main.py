@@ -134,8 +134,7 @@ TOP_H2H_PLAYER = "lastexiler"   # whose games to compare (override in config.jso
 # so the comparison is a specific pair (e.g. lastexiler vs xoka_tg). Empty ("")
 # falls back to the current top-1. Override in config.json: top_h2h_opponent.
 TOP_H2H_OPPONENT = "xoka_tg"
-TOP_H2H_DEADLINE = 300          # seconds budget for the daily H2H scan
-TOP_H2H_DAILY_FILE = BASE_DIR / "top_h2h_daily.txt"  # last date the H2H was posted
+TOP_H2H_DEADLINE = 300          # seconds budget for the manual H2H scan
 # Announce newly-appeared contest tasks (new task templates) to the chat.
 TOP_TASKS_ENABLED = True
 TOP_TASKS_SEEN_FILE = BASE_DIR / "top_tasks_seen.json"  # template ids already announced
@@ -1934,7 +1933,6 @@ def choose_action():
                 ("🎯 Снайпер комментариев (первый коммент)", "sniper"),
                 ("📊 Слежение за топом @mrkt (постить в чат)", "top_tracker"),
                 ("🎯 PvP 1-на-1: я против игрока", "pvp_h2h"),
-                ("📊 H2H в чат: lastexiler vs xoka_tg (без вопросов)", "h2h_chat"),
             ])
             if sub:
                 return sub
@@ -3209,74 +3207,6 @@ async def run_pvp_h2h(config):
             pass
 
 
-async def run_h2h_to_chat(config):
-    """One-tap: lastexiler vs the current top-1, posted straight to the chat — no
-    prompts. Auto-picks the first working @mrkt session and resolves top-1 from
-    the live (or just-finished) leaderboard."""
-    c = _C
-    player = config.get("top_h2h_player") or TOP_H2H_PLAYER
-    opp_label = _h2h_opponent(config) or "топ-1"
-    print(f"\n{c['cyan']}{c['bold']}📊 H2H в чат: {player} vs {opp_label}{c['reset']}")
-    import tgmrkt
-    api_id, api_hash = int(config["api_id"]), str(config["api_hash"])
-    sessions = get_session_files(SESSIONS_DIR) + get_session_files(NEW_SESSIONS_DIR)
-    if not sessions:
-        print(f"{c['yel']}Нет живых сессий.{c['reset']}")
-        return
-    for session_path in sessions:
-        label = session_path.stem
-        client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash)
-        try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                await client.disconnect()
-                continue
-            init_data = await get_menu_webview_init_data(client, MRKT_BOT)
-            photo = _mrkt_photo(init_data)
-
-            def _work():
-                m = tgmrkt.TgMrkt(init_data, photo)
-                m.auth()
-                pref = config.get("top_leaderboard_slug") or TOP_LEADERBOARD_SLUG
-                board = None
-                try:
-                    board, _slug = m.leaderboard_auto(pref)
-                except Exception:
-                    board = None
-                rows = tgmrkt.extract_rows(board) if board else []
-                opp = _h2h_opponent(config, rows[0]["name"] if rows else "")
-                since = (board.get("timeRange") or {}).get("startAt") \
-                    if isinstance(board, dict) else None
-                if not since:
-                    since = config.get("top_contest_start")
-                if not opp:
-                    return None, None, None
-                h = m.pvp_head_to_head(player, opp, since, deadline_s=TOP_H2H_DEADLINE)
-                return h, opp, tgmrkt.ton_usd_rate(TON_USD)
-
-            print(f"{c['dim']}Сессия {label}: считаю игры {player} vs {opp_label}… "
-                  f"(может занять минуту){c['reset']}")
-            h, opp, rate = await asyncio.to_thread(_work)
-            if h is None:
-                print(f"{c['yel']}Не удалось определить топ-1 (лидерборд недоступен). "
-                      f"Впиши ник в config.json → top_h2h_opponent или используй "
-                      f"пункт «PvP 1-на-1».{c['reset']}")
-                return
-            text = _format_h2h(h, rate)
-            print(text)
-            await client.send_message(TOP_CHAT_ID, text)
-            print(f"{c['grn']}Отправлено в чат ({player} vs {opp}).{c['reset']}")
-            return
-        except Exception as e:
-            print(f"{c['dim']}[{label}] не вышло: {e}{c['reset']}")
-        finally:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-    print(f"{c['yel']}Ни одна сессия не сработала.{c['reset']}")
-
-
 def _format_h2h(h, ton_usd=0.0):
     a, b = h["me"], h["opp"]
 
@@ -3342,9 +3272,18 @@ async def fetch_and_post_top(config, session_path):
                 # incremental budget afterwards.
                 complete = bool(rooms) and all(r.get("done") for r in rooms.values())
                 dl = TOP_PVP_DEADLINE if complete else TOP_PVP_BASELINE_DEADLINE
+                # Fold the fixed-pair H2H (lastexiler vs xoka_tg) into the same
+                # pass, so it's available every cycle with no extra scan.
+                h2h_player = config.get("top_h2h_player") or TOP_H2H_PLAYER
+                b_rows = tgmrkt.extract_rows(board)
+                h2h_opp = _h2h_opponent(config, b_rows[0]["name"] if b_rows else "")
+                pair = None
+                if (TOP_H2H_AUTO and h2h_player and h2h_opp
+                        and h2h_player.lower() != h2h_opp.lower()):
+                    pair = (h2h_player, h2h_opp)
                 try:
                     added = m.accumulate_pvp(state, since, deadline_s=dl,
-                                             max_new=TOP_PVP_MAX_GAMES)
+                                             max_new=TOP_PVP_MAX_GAMES, h2h_pair=pair)
                 except Exception as e:
                     logger.warning(f"Top: PvP накопление — {e}")
             tasks = []
@@ -3429,39 +3368,24 @@ async def fetch_and_post_top(config, session_path):
                             f"{len(pnl) if pnl else 0}, +{added} новых игр, "
                             f"история {done_rooms}/{total_rooms} комнат готово)")
 
-        # Once a day: "my games vs top1" head-to-head. Runs even when the
-        # leaderboard is down — opponent = current top-1 if known, else the
-        # configured nickname (config.json: top_h2h_opponent).
-        h2h_player = config.get("top_h2h_player") or TOP_H2H_PLAYER
-        opponent = _h2h_opponent(config, rows[0]["name"] if rows else "")
-        if TOP_H2H_AUTO and h2h_player and opponent:
-            last_h2h = ""
-            try:
-                last_h2h = TOP_H2H_DAILY_FILE.read_text(encoding="utf-8").strip()
-            except Exception:
-                pass
-            if today != last_h2h and h2h_player.lower() != opponent.lower():
-                since_iso = (payload.get("timeRange") or {}).get("startAt") \
-                    if isinstance(payload, dict) else None
-                if not since_iso:
-                    since_iso = config.get("top_contest_start")  # optional ISO
-
-                def _h2h_work():
-                    mm = tgmrkt.TgMrkt(init_data, photo)
-                    mm.auth()
-                    return mm.pvp_head_to_head(h2h_player, opponent, since_iso,
-                                               deadline_s=TOP_H2H_DEADLINE)
-                try:
-                    h = await asyncio.to_thread(_h2h_work)
-                    await client.send_message(TOP_CHAT_ID, _format_h2h(h, rate))
+        # H2H (lastexiler vs xoka_tg) — folded into the PvP pass above, so it's
+        # free to post here. Post it whenever the pair's game count changes (on
+        # first availability and after new games between them), not identical
+        # repeats every hour.
+        if TOP_H2H_AUTO:
+            h = tgmrkt.h2h_from_state(pvp_state)
+            if h and h["overall"]["games"] > 0:
+                hs = pvp_state.get("h2h") or {}
+                g = h["overall"]["games"]
+                if g != hs.get("posted_games"):
                     try:
-                        TOP_H2H_DAILY_FILE.write_text(today, encoding="utf-8")
-                    except Exception:
-                        pass
-                    logger.info(f"Top: H2H {h2h_player} vs {opponent} запостен "
-                                f"({h.get('scanned', 0)} игр просканировано)")
-                except Exception as e:
-                    logger.warning(f"Top: H2H — {e}")
+                        await client.send_message(TOP_CHAT_ID, _format_h2h(h, rate))
+                        hs["posted_games"] = g
+                        _save_pvp_state(pvp_state)
+                        logger.info(f"Top: H2H {h['me']} vs {h['opp']} запостен "
+                                    f"({g} совместных игр)")
+                    except Exception as e:
+                        logger.warning(f"Top: H2H — {e}")
     except Exception as e:
         logger.error(f"Top: ошибка — {e}")
     finally:
@@ -3728,9 +3652,6 @@ async def main():
             return
         if action == "pvp_h2h":
             await run_pvp_h2h(config)
-            return
-        if action == "h2h_chat":
-            await run_h2h_to_chat(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
