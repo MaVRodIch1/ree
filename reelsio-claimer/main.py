@@ -129,7 +129,11 @@ TOP_H2H_ENABLED = False
 # Once-a-day head-to-head of a specific player vs the current top-1, posted to
 # the chat ("my games vs top1"). Not hourly — just one recap per day.
 TOP_H2H_AUTO = True
-TOP_H2H_PLAYER = "lastexiler"   # whose games-vs-top1 to post (override in config.json)
+TOP_H2H_PLAYER = "lastexiler"   # whose games to compare (override in config.json)
+# Fixed opponent for the H2H. When set, it's used instead of the live top-1 —
+# so the comparison is a specific pair (e.g. lastexiler vs xoka_tg). Empty ("")
+# falls back to the current top-1. Override in config.json: top_h2h_opponent.
+TOP_H2H_OPPONENT = "xoka_tg"
 TOP_H2H_DEADLINE = 300          # seconds budget for the daily H2H scan
 TOP_H2H_DAILY_FILE = BASE_DIR / "top_h2h_daily.txt"  # last date the H2H was posted
 # Announce newly-appeared contest tasks (new task templates) to the chat.
@@ -1930,7 +1934,7 @@ def choose_action():
                 ("🎯 Снайпер комментариев (первый коммент)", "sniper"),
                 ("📊 Слежение за топом @mrkt (постить в чат)", "top_tracker"),
                 ("🎯 PvP 1-на-1: я против игрока", "pvp_h2h"),
-                ("📊 H2H в чат: lastexiler vs топ-1 (без вопросов)", "h2h_chat"),
+                ("📊 H2H в чат: lastexiler vs xoka_tg (без вопросов)", "h2h_chat"),
             ])
             if sub:
                 return sub
@@ -3128,6 +3132,12 @@ def _save_top_snapshot(history, rows):
         pass
 
 
+def _h2h_opponent(config, top1=""):
+    """Resolve the H2H opponent: a fixed configured/constant nickname takes
+    priority (specific-pair comparison), else the current top-1."""
+    return config.get("top_h2h_opponent") or TOP_H2H_OPPONENT or top1
+
+
 async def run_pvp_h2h(config):
     c = _C
     print(f"\n{c['cyan']}{c['bold']}🎯 PvP 1-на-1: ты против игрока{c['reset']}")
@@ -3166,7 +3176,7 @@ async def run_pvp_h2h(config):
         # Default player A to "my player" (config / constant) so Enter→Enter
         # gives exactly "<my player> vs top1".
         my_player = config.get("top_h2h_player") or TOP_H2H_PLAYER or top2
-        opp_default = top1 or config.get("top_h2h_opponent") or ""
+        opp_default = _h2h_opponent(config, top1)
         if top1 or top2:
             print(f"{c['dim']}Топ-1: {top1} · Топ-2: {top2}. "
                   f"Можно ввести любые ники.{c['reset']}")
@@ -3204,11 +3214,11 @@ async def run_h2h_to_chat(config):
     prompts. Auto-picks the first working @mrkt session and resolves top-1 from
     the live (or just-finished) leaderboard."""
     c = _C
-    print(f"\n{c['cyan']}{c['bold']}📊 H2H в чат: "
-          f"{config.get('top_h2h_player') or TOP_H2H_PLAYER} vs топ-1{c['reset']}")
+    player = config.get("top_h2h_player") or TOP_H2H_PLAYER
+    opp_label = _h2h_opponent(config) or "топ-1"
+    print(f"\n{c['cyan']}{c['bold']}📊 H2H в чат: {player} vs {opp_label}{c['reset']}")
     import tgmrkt
     api_id, api_hash = int(config["api_id"]), str(config["api_hash"])
-    player = config.get("top_h2h_player") or TOP_H2H_PLAYER
     sessions = get_session_files(SESSIONS_DIR) + get_session_files(NEW_SESSIONS_DIR)
     if not sessions:
         print(f"{c['yel']}Нет живых сессий.{c['reset']}")
@@ -3234,7 +3244,7 @@ async def run_h2h_to_chat(config):
                 except Exception:
                     board = None
                 rows = tgmrkt.extract_rows(board) if board else []
-                opp = (rows[0]["name"] if rows else "") or config.get("top_h2h_opponent") or ""
+                opp = _h2h_opponent(config, rows[0]["name"] if rows else "")
                 since = (board.get("timeRange") or {}).get("startAt") \
                     if isinstance(board, dict) else None
                 if not since:
@@ -3244,7 +3254,7 @@ async def run_h2h_to_chat(config):
                 h = m.pvp_head_to_head(player, opp, since, deadline_s=TOP_H2H_DEADLINE)
                 return h, opp, tgmrkt.ton_usd_rate(TON_USD)
 
-            print(f"{c['dim']}Сессия {label}: считаю игры {player} vs топ-1… "
+            print(f"{c['dim']}Сессия {label}: считаю игры {player} vs {opp_label}… "
                   f"(может занять минуту){c['reset']}")
             h, opp, rate = await asyncio.to_thread(_work)
             if h is None:
@@ -3423,7 +3433,7 @@ async def fetch_and_post_top(config, session_path):
         # leaderboard is down — opponent = current top-1 if known, else the
         # configured nickname (config.json: top_h2h_opponent).
         h2h_player = config.get("top_h2h_player") or TOP_H2H_PLAYER
-        opponent = rows[0]["name"] if rows else (config.get("top_h2h_opponent") or "")
+        opponent = _h2h_opponent(config, rows[0]["name"] if rows else "")
         if TOP_H2H_AUTO and h2h_player and opponent:
             last_h2h = ""
             try:
