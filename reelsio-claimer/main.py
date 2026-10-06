@@ -115,7 +115,7 @@ MSK = timezone(timedelta(hours=3))    # Moscow time for display
 TOP_USD_PER_POINT = 800 / 330000
 # The leaderboard slug (from /api/v1/leaderboard/<slug>). Rotates per contest;
 # override in config.json ("top_leaderboard_slug") or let auto-discovery heal it.
-TOP_LEADERBOARD_SLUG = "playhub_rush_week"
+TOP_LEADERBOARD_SLUG = "playhub_hot_streak"
 # PvP win/loss: whether to compute the net (scanned from the contest start),
 # and the TON→USD rate used to show net in dollars.
 TOP_PVP_ENABLED = True

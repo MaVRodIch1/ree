@@ -302,6 +302,12 @@ class TgMrkt:
             state["players"] = {}
             state["rooms"] = {}
             state["v"] = PVP_STATE_VERSION
+        # New tournament → wipe last contest's totals so "забрал/слил" don't mix.
+        # The contest is identified by its start time (board.timeRange.startAt).
+        if since_iso and state.get("since") != since_iso:
+            state["players"] = {}
+            state["rooms"] = {}
+            state["since"] = since_iso
         players = state.setdefault("players", {})  # name -> record (see layout above)
         # Belt-and-suspenders: pad any short record so no index ever IndexErrors.
         for _rec in players.values():
