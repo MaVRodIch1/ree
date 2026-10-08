@@ -3245,16 +3245,23 @@ def _format_h2h(h, ton_usd=0.0):
             return f"{title}: совместных игр нет"
         wr = 100 * bk["my_wins"] / g
         wrb = 100 * bk["opp_wins"] / g
+        lost = bk["a_to_b_ton"]       # a's stake (TON+gift floor) in games a LOST
+        won = bk["b_to_a_ton"]        # value a TOOK from b in games a won
         ton_net = bk.get("my_ton_net_ton", bk["my_net_ton"])
         return (f"{title} — игр: {g}\n"
                 f"  Победы {a}: {bk['my_wins']} ({wr:.0f}%) · {b}: {bk['opp_wins']} ({wrb:.0f}%) · другие: {bk['other_wins']}\n"
-                f"  {a} слил {b}: {bk['a_to_b_ton']:.1f} TON{usd(bk['a_to_b_ton'])}\n"
-                f"  {b} слил {a}: {bk['b_to_a_ton']:.1f} TON{usd(bk['b_to_a_ton'])}\n"
-                f"  Нетто {a} (чистый TON, как в балансе): {ton_net:+.1f} TON{usd(ton_net)}\n"
-                f"  С учётом гифтов (по флору MRKT): {bk['my_net_ton']:+.1f} TON{usd(bk['my_net_ton'])}")
+                f"  {a} проиграл (гифты+TON по флору): {lost:.1f} TON{usd(lost)}\n"
+                f"  {a} выиграл (гифты+TON по флору): {won:.1f} TON{usd(won)}\n"
+                f"  ── Нетто с учётом гифтов: {bk['my_net_ton']:+.1f} TON{usd(bk['my_net_ton'])}\n"
+                f"  ── Нетто чистыми TON (как в балансе): {ton_net:+.1f} TON{usd(ton_net)}")
+    note = ("ℹ️ Гифты считаются по флор-цене MRKT. «Нетто с учётом гифтов» — "
+            "итог, где выигранные подарки (кубки и т.п.) уже прибавлены, а "
+            "проигранные вычтены. «Чистыми TON» — только живые TON, как в "
+            "кошельке (подарки не считаются).")
     return (f"🎯 PvP: {a} vs {b}  (просканировано {h['scanned']} игр)\n\n"
             f"{block(h['overall'], '▪️ Все совместные игры')}\n\n"
-            f"{block(h['duel'], '⚔️ Только 1-на-1')}")
+            f"{block(h['duel'], '⚔️ Только 1-на-1')}\n\n"
+            f"{note}")
 
 
 async def fetch_and_post_top(config, session_path):
