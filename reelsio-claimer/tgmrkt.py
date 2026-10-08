@@ -286,6 +286,71 @@ class TgMrkt:
                          max_games: int = 20000, deadline_s: float | None = None):
         return self.scan_pvp(since_iso, (me, opp), max_games, deadline_s)[1]
 
+    def pvp_h2h_multi(self, me: str, opponents, since_iso: str | None = None,
+                      max_games: int = 20000, deadline_s: float | None = None):
+        """One pass over PvP history that builds the head-to-head of `me` against
+        EACH opponent at once (cheap — a single scan, not one per opponent).
+        Returns {opponent: h2h_dict} in the same shape pvp_head_to_head gives."""
+        started = time.time()
+        try:
+            rooms = _room_ids(self.game_rooms())
+        except Exception:
+            rooms = []
+        opps = [o for o in dict.fromkeys(opponents) if o and o != me]
+        buck = {o: {"overall": _blank_h2h(), "duel": _blank_h2h()} for o in opps}
+        seen = 0
+        for rid in rooms:
+            cursor, stop, pages = "", False, 0
+            while seen < max_games and not stop and pages < 2000:
+                if deadline_s and time.time() - started > deadline_s:
+                    stop = True
+                    break
+                pages += 1
+                try:
+                    data = self.pvp_history(rid, cursor)
+                except Exception:
+                    break
+                games = data.get("pvpGameHistoryDtos") or []
+                if not games:
+                    break
+                for g in games:
+                    if since_iso and (g.get("createdAt") or "") < since_iso:
+                        stop = True
+                        break
+                    seen += 1
+                    win = g.get("winner") or {}
+                    wname = win.get("publicName")
+                    pot = g.get("totalWinNanoTONs") or 0
+                    parts = {}
+                    for p in g.get("participants") or []:
+                        nm = p.get("publicName")
+                        if nm:
+                            parts[nm] = (p.get("totalBetNanoTONs") or 0) + \
+                                        (p.get("totalGiftBetsPrice") or 0)
+                    if me not in parts:
+                        if seen >= max_games:
+                            stop = True
+                            break
+                        continue
+                    for o in opps:
+                        if o in parts:
+                            _acc_h2h(buck[o]["overall"], me, o, wname, pot,
+                                     parts[me], parts[o])
+                            if len(parts) == 2:
+                                _acc_h2h(buck[o]["duel"], me, o, wname, pot,
+                                         parts[me], parts[o])
+                    if seen >= max_games:
+                        stop = True
+                        break
+                cursor = data.get("cursor") or ""
+                if not cursor:
+                    break
+            if deadline_s and time.time() - started > deadline_s:
+                break
+        return {o: {"me": me, "opp": o, "scanned": seen,
+                    "overall": _h2h_ton(buck[o]["overall"]),
+                    "duel": _h2h_ton(buck[o]["duel"])} for o in opps}
+
     def accumulate_pvp(self, state: dict, since_iso: str | None = None,
                        deadline_s: float = 60, max_new: int = 8000) -> int:
         """Incrementally fold PvP history into a persistent `state`, counting

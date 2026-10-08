@@ -79,6 +79,7 @@ yandex_tmp/
 top_daily.txt
 top_h2h_daily.txt
 top_h2h_sig.txt
+top_h2h_ts.txt
 
 # Leaderboard PvP cache
 top_pvp_state.json
