@@ -3472,30 +3472,40 @@ async def run_combo(config):
           f"Снайпер (если включён) стреляет мгновенно, не мешая циклам. "
           f"Ctrl+C для остановки.{c['reset']}")
 
-    reels_mode = prompt_menu("Рилс — режим:", [
-        ("Фарм — только собрать/показать фриспины", "farm"),
-        ("Спин — прокрутить все фриспины", "spin"),
-    ], back=False)
-    if reels_mode is None:
-        return
+    want_reels = input(
+        "Фармить Рилс? (y/n) [y] — «n» = только слежение за топом и просмотры: "
+    ).strip().lower() in ("", "y", "yes", "да")
 
-    when = prompt_menu("Когда запустить первый цикл Рилс?", [
-        ("▶️  Сейчас (сразу)", "now"),
-        ("⏱  Через N часов (ввести)", "delay"),
-        ("⏭  Пропустить первый круг (только дневной блок/снайпер)", "skip"),
-    ], back=False)
-    if when is None:
-        return
-
-    skip_first_reels = when == "skip"
+    reels_mode = "farm"
+    skip_first_reels = False
     first_reels_delay = 0.0
-    if when == "delay":
-        raw = input("Через сколько часов запустить первый цикл Рилс? (напр. 2 или 0.5): ").strip()
-        try:
-            first_reels_delay = max(0.0, float(raw.replace(",", "."))) * 3600
-        except ValueError:
-            print(f"{c['yel']}Не понял число — запущу сейчас.{c['reset']}")
-            first_reels_delay = 0.0
+    if want_reels:
+        reels_mode = prompt_menu("Рилс — режим:", [
+            ("Фарм — только собрать/показать фриспины", "farm"),
+            ("Спин — прокрутить все фриспины", "spin"),
+        ], back=False)
+        if reels_mode is None:
+            return
+
+        when = prompt_menu("Когда запустить первый цикл Рилс?", [
+            ("▶️  Сейчас (сразу)", "now"),
+            ("⏱  Через N часов (ввести)", "delay"),
+            ("⏭  Пропустить первый круг (только дневной блок/снайпер)", "skip"),
+        ], back=False)
+        if when is None:
+            return
+
+        skip_first_reels = when == "skip"
+        if when == "delay":
+            raw = input("Через сколько часов запустить первый цикл Рилс? (напр. 2 или 0.5): ").strip()
+            try:
+                first_reels_delay = max(0.0, float(raw.replace(",", "."))) * 3600
+            except ValueError:
+                print(f"{c['yel']}Не понял число — запущу сейчас.{c['reset']}")
+                first_reels_delay = 0.0
+    else:
+        print(f"{c['dim']}Рилс выключен — будет только слежение за топом и "
+              f"просмотры канала.{c['reset']}")
 
     want_sniper = input(
         f"Держать снайпер комментариев @{SNIPER_CHANNEL} параллельно? (y/n) [y]: "
@@ -3603,21 +3613,26 @@ async def run_combo(config):
     top = asyncio.create_task(
         top_tracker_task(config, top_session, pause_event=reels_active)) if want_top else None
 
-    while not shutdown_event.is_set():
-        await reels_block()
-        if shutdown_event.is_set():
-            break
-        await maybe_run_asteroids()
-        if shutdown_event.is_set():
-            break
+    if not want_reels:
+        # Reels off: only the background views monitor + top tracker run.
+        logger.info("Combo: Рилс выключен — работают слежение за топом и просмотры")
+        await shutdown_event.wait()
+    else:
+        while not shutdown_event.is_set():
+            await reels_block()
+            if shutdown_event.is_set():
+                break
+            await maybe_run_asteroids()
+            if shutdown_event.is_set():
+                break
 
-        jitter = random.uniform(0, random_delay_minutes) * 60
-        total_sleep = interval_hours * 3600 + jitter
-        logger.info(f"Combo: sleeping {total_sleep/3600:.2f}h until next Reels cycle")
-        try:
-            await asyncio.wait_for(shutdown_event.wait(), timeout=total_sleep)
-        except asyncio.TimeoutError:
-            pass
+            jitter = random.uniform(0, random_delay_minutes) * 60
+            total_sleep = interval_hours * 3600 + jitter
+            logger.info(f"Combo: sleeping {total_sleep/3600:.2f}h until next Reels cycle")
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=total_sleep)
+            except asyncio.TimeoutError:
+                pass
 
     if sniper:
         sniper.cancel()
