@@ -3245,11 +3245,13 @@ def _format_h2h(h, ton_usd=0.0):
             return f"{title}: совместных игр нет"
         wr = 100 * bk["my_wins"] / g
         wrb = 100 * bk["opp_wins"] / g
+        ton_net = bk.get("my_ton_net_ton", bk["my_net_ton"])
         return (f"{title} — игр: {g}\n"
                 f"  Победы {a}: {bk['my_wins']} ({wr:.0f}%) · {b}: {bk['opp_wins']} ({wrb:.0f}%) · другие: {bk['other_wins']}\n"
                 f"  {a} слил {b}: {bk['a_to_b_ton']:.1f} TON{usd(bk['a_to_b_ton'])}\n"
                 f"  {b} слил {a}: {bk['b_to_a_ton']:.1f} TON{usd(bk['b_to_a_ton'])}\n"
-                f"  Нетто {a} в этих играх: {bk['my_net_ton']:+.1f} TON{usd(bk['my_net_ton'])}")
+                f"  Нетто {a} (чистый TON, как в балансе): {ton_net:+.1f} TON{usd(ton_net)}\n"
+                f"  С учётом гифтов (по флору MRKT): {bk['my_net_ton']:+.1f} TON{usd(bk['my_net_ton'])}")
     return (f"🎯 PvP: {a} vs {b}  (просканировано {h['scanned']} игр)\n\n"
             f"{block(h['overall'], '▪️ Все совместные игры')}\n\n"
             f"{block(h['duel'], '⚔️ Только 1-на-1')}")
