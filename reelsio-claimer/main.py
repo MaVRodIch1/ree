@@ -133,7 +133,7 @@ TOP_H2H_PLAYER = "lastexiler"   # whose games to compare (override in config.jso
 # config.json: top_h2h_opponents (list). top1/top2 first, then softers.
 TOP_H2H_OPPONENTS = ["legality", "hundredtrillionusd",
                      "Gold_3619", "alichaal", "merikosVP"]
-TOP_H2H_INTERVAL_HOURS = 3      # how often the H2H batch is posted
+TOP_H2H_INTERVAL_HOURS = 24     # how often the H2H batch is posted (once a day)
 TOP_H2H_DEADLINE = 300          # seconds budget for the single multi-opponent scan
 TOP_H2H_TS_FILE = BASE_DIR / "top_h2h_ts.txt"  # epoch of the last H2H batch post
 # Announce newly-appeared contest tasks (new task templates) to the chat.
@@ -3146,13 +3146,20 @@ def _h2h_opponent(config, top1=""):
     return (opps[0] if opps else "") or top1
 
 
-def _h2h_due() -> bool:
-    """True if at least TOP_H2H_INTERVAL_HOURS passed since the last batch post."""
+def _h2h_due(config=None) -> bool:
+    """True if at least the H2H interval passed since the last batch post.
+    Interval is config.json top_h2h_interval_hours, else the constant."""
+    hours = TOP_H2H_INTERVAL_HOURS
+    if config:
+        try:
+            hours = float(config.get("top_h2h_interval_hours") or hours)
+        except Exception:
+            pass
     try:
         last = float(TOP_H2H_TS_FILE.read_text(encoding="utf-8").strip())
     except Exception:
         return True
-    return (time.time() - last) >= TOP_H2H_INTERVAL_HOURS * 3600
+    return (time.time() - last) >= hours * 3600
 
 
 def _mark_h2h_posted():
@@ -3395,9 +3402,10 @@ async def fetch_and_post_top(config, session_path):
                             f"история {done_rooms}/{total_rooms} комнат готово)")
 
         # H2H: lastexiler vs each opponent (top-1/top-2 + softers), one message
-        # each, at most once every TOP_H2H_INTERVAL_HOURS so it doesn't spam.
-        # A single multi-opponent scan covers all pairs. Runs after the top post.
-        if TOP_H2H_AUTO and _h2h_due():
+        # each, once a day by default so it doesn't spam. Turn off entirely with
+        # config.json top_h2h_auto=false; tune cadence with top_h2h_interval_hours.
+        h2h_on = config.get("top_h2h_auto", TOP_H2H_AUTO)
+        if h2h_on and _h2h_due(config):
             h2h_player = config.get("top_h2h_player") or TOP_H2H_PLAYER
             opps = [o for o in _h2h_opponents(config)
                     if o and o.lower() != h2h_player.lower()]
