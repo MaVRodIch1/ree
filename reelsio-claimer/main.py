@@ -3515,8 +3515,16 @@ async def run_combo(config):
                 print(f"{c['yel']}Не понял число — запущу сейчас.{c['reset']}")
                 first_reels_delay = 0.0
     else:
-        print(f"{c['dim']}Рилс выключен — будет только слежение за топом и "
-              f"просмотры канала.{c['reset']}")
+        print(f"{c['dim']}Рилс выключен.{c['reset']}")
+
+    # Channel views use the WHOLE sessions/ pool. Make it optional so you can run
+    # top-tracking only, without touching sessions that are busy in another
+    # project (sharing one .session across two running projects breaks the login).
+    want_views = input(
+        f"Смотреть/читать посты канала @{VIEWS_CHANNEL} (всеми сессиями из sessions/)? "
+        f"(y/n) [{'y' if want_reels else 'n'}]: "
+    ).strip().lower()
+    want_views = (want_views in ("y", "yes", "да")) or (want_views == "" and want_reels)
 
     want_sniper = input(
         f"Держать снайпер комментариев @{SNIPER_CHANNEL} параллельно? (y/n) [y]: "
@@ -3618,15 +3626,21 @@ async def run_combo(config):
             reels_active.clear()
         first_cycle = False
 
-    # Background post monitor — reacts to new posts during rest windows.
-    views = asyncio.create_task(views_monitor())
+    # Background post monitor — reacts to new posts (uses the whole sessions/ pool).
+    views = asyncio.create_task(views_monitor()) if want_views else None
     # Background leaderboard tracker — posts Top-50 to the chat.
     top = asyncio.create_task(
         top_tracker_task(config, top_session, pause_event=reels_active)) if want_top else None
 
     if not want_reels:
-        # Reels off: only the background views monitor + top tracker run.
-        logger.info("Combo: Рилс выключен — работают слежение за топом и просмотры")
+        # Reels off: only the background tasks that were enabled run.
+        active = []
+        if want_top:
+            active.append("слежение за топом")
+        if want_views:
+            active.append("просмотры канала")
+        logger.info(f"Combo: Рилс выключен — работает: "
+                    f"{', '.join(active) or 'ничего (включи топ или просмотры)'}")
         await shutdown_event.wait()
     else:
         while not shutdown_event.is_set():
@@ -3647,7 +3661,8 @@ async def run_combo(config):
 
     if sniper:
         sniper.cancel()
-    views.cancel()
+    if views:
+        views.cancel()
     if top:
         top.cancel()
     logger.info("Combo stopped")
