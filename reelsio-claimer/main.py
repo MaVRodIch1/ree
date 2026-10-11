@@ -353,13 +353,27 @@ def mark_dead_session(label: str) -> None:
     logger.info(f"Мёртвая сессия {label} убрана из очереди (dead_sessions.txt)")
 
 
+EXCLUDE_SESSIONS_FILE = BASE_DIR / "exclude_sessions.txt"
+
+
+def load_excluded_sessions() -> set:
+    """Session labels the user wants this project to never auto-use (e.g. busy
+    in another project). Excluded from the pool; still visible to manual pick."""
+    try:
+        return {l.split("#", 1)[0].strip()
+                for l in EXCLUDE_SESSIONS_FILE.read_text(encoding="utf-8").splitlines()
+                if l.split("#", 1)[0].strip()}
+    except Exception:
+        return set()
+
+
 def get_session_files(directory: Path = SESSIONS_DIR,
                       skip_dead: bool = True) -> list[Path]:
     files = sorted(directory.glob("*.session"))
     if skip_dead:
-        dead = load_dead_sessions()
-        if dead:
-            files = [f for f in files if f.stem not in dead]
+        drop = load_dead_sessions() | load_excluded_sessions()
+        if drop:
+            files = [f for f in files if f.stem not in drop]
     return files
 
 
