@@ -280,7 +280,7 @@ class TgMrkt:
         pnl["_complete"] = complete
         h2h = None
         if h2h_pair:
-            h2h = {"me": a, "opp": b, "scanned": seen,
+            h2h = {"me": a, "opp": b, "scanned": seen, "complete": complete,
                    "overall": _h2h_ton(overall), "duel": _h2h_ton(duel)}
         return pnl, h2h
 
@@ -292,10 +292,13 @@ class TgMrkt:
         return self.scan_pvp(since_iso, (me, opp), max_games, deadline_s)[1]
 
     def pvp_h2h_multi(self, me: str, opponents, since_iso: str | None = None,
-                      max_games: int = 20000, deadline_s: float | None = None):
+                      max_games: int = 60000, deadline_s: float | None = None,
+                      count: int = 50):
         """One pass over PvP history that builds the head-to-head of `me` against
         EACH opponent at once (cheap — a single scan, not one per opponent).
-        Returns {opponent: h2h_dict} in the same shape pvp_head_to_head gives."""
+        Returns {opponent: h2h_dict}; each dict carries `scanned` and `complete`
+        (False if the scan was cut short by the deadline/cap, so counts may be
+        undercounted)."""
         started = time.time()
         try:
             rooms = _room_ids(self.game_rooms())
@@ -304,16 +307,19 @@ class TgMrkt:
         opps = [o for o in dict.fromkeys(opponents) if o and o != me]
         buck = {o: {"overall": _blank_h2h(), "duel": _blank_h2h()} for o in opps}
         seen = 0
+        complete = True
         for rid in rooms:
             cursor, stop, pages = "", False, 0
-            while seen < max_games and not stop and pages < 2000:
+            while seen < max_games and not stop and pages < 20000:
                 if deadline_s and time.time() - started > deadline_s:
+                    complete = False
                     stop = True
                     break
                 pages += 1
                 try:
-                    data = self.pvp_history(rid, cursor)
+                    data = self.pvp_history(rid, cursor, count)
                 except Exception:
+                    complete = False
                     break
                 games = data.get("pvpGameHistoryDtos") or []
                 if not games:
@@ -336,6 +342,7 @@ class TgMrkt:
                             tparts[nm] = tb
                     if me not in parts:
                         if seen >= max_games:
+                            complete = False
                             stop = True
                             break
                         continue
@@ -349,14 +356,16 @@ class TgMrkt:
                                          parts[me], parts[o], ton_pot,
                                          tparts.get(me, 0), tparts.get(o, 0))
                     if seen >= max_games:
+                        complete = False
                         stop = True
                         break
                 cursor = data.get("cursor") or ""
                 if not cursor:
                     break
             if deadline_s and time.time() - started > deadline_s:
+                complete = False
                 break
-        return {o: {"me": me, "opp": o, "scanned": seen,
+        return {o: {"me": me, "opp": o, "scanned": seen, "complete": complete,
                     "overall": _h2h_ton(buck[o]["overall"]),
                     "duel": _h2h_ton(buck[o]["duel"])} for o in opps}
 

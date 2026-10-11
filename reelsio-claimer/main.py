@@ -134,7 +134,7 @@ TOP_H2H_PLAYER = "lastexiler"   # whose games to compare (override in config.jso
 TOP_H2H_OPPONENTS = ["legality", "hundredtrillionusd",
                      "Gold_3619", "alichaal", "merikosVP"]
 TOP_H2H_INTERVAL_HOURS = 24     # how often the H2H batch is posted (once a day)
-TOP_H2H_DEADLINE = 300          # seconds budget for the single multi-opponent scan
+TOP_H2H_DEADLINE = 1500         # seconds budget for the once-a-day multi-opponent scan
 TOP_H2H_TS_FILE = BASE_DIR / "top_h2h_ts.txt"  # epoch of the last H2H batch post
 # Announce newly-appeared contest tasks (new task templates) to the chat.
 TOP_TASKS_ENABLED = True
@@ -3265,6 +3265,9 @@ def _format_h2h(h, ton_usd=0.0):
             "итог, где выигранные подарки (кубки и т.п.) уже прибавлены, а "
             "проигранные вычтены. «Чистыми TON» — только живые TON, как в "
             "кошельке (подарки не считаются).")
+    if not h.get("complete", True):
+        note = ("⚠️ История отсканирована не полностью (упёрлись в лимит времени) — "
+                "число игр может быть занижено.\n" + note)
     return (f"🎯 PvP: {a} vs {b}  (просканировано {h['scanned']} игр)\n\n"
             f"{block(h['overall'], '▪️ Все совместные игры')}\n\n"
             f"{block(h['duel'], '⚔️ Только 1-на-1')}\n\n"
