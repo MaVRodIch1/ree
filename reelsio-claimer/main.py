@@ -1181,14 +1181,14 @@ async def _sniper_send(client, channel_entity, post_id, text, media, slog):
 
 
 async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
-                      session_name=SNIPER_SESSION, audio=None):
+                      session_name=SNIPER_SESSION, audio=None, session_path=None):
     """Watch `channel` and instantly comment under every new post."""
     slog = logging.getLogger(f"reelsio-claimer.sniper")
     slog.handlers = logger.handlers
     slog.propagate = False
     slog.setLevel(logging.INFO)
 
-    session_path = find_session_by_name(session_name)
+    session_path = session_path or find_session_by_name(session_name)
     if not session_path:
         slog.error(f"session {session_name} not found in sessions/ or new_sessions/")
         return
@@ -1286,11 +1286,29 @@ async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
             pass
 
 
+async def sniper_fleet(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT, audio=None):
+    """Run the sniper on EVERY session in sniper_session/ at once — each account
+    comments under new posts independently (more sessions = more comments).
+    Falls back to the single configured session if the folder is empty."""
+    sessions = get_session_files(SNIPER_SESSION_DIR)
+    if not sessions:
+        await sniper_task(config, channel, text, SNIPER_SESSION, audio)
+        return
+    audio = audio or find_sniper_audio()
+    logger.info(f"Снайпер: сессий в работе — {len(sessions)} (@{channel}): "
+                f"{', '.join(sp.stem for sp in sessions)}")
+    tasks = [asyncio.create_task(
+                sniper_task(config, channel, text, sp.stem, audio, session_path=sp))
+             for sp in sessions]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def run_sniper(config):
     c = _C
     print(f"\n{c['cyan']}{c['bold']}🎯 Снайпер комментариев{c['reset']}")
+    n_pool = len(get_session_files(SNIPER_SESSION_DIR))
     ch = input(f"Канал без @ [{SNIPER_CHANNEL}]: ").strip().lstrip("@") or SNIPER_CHANNEL
-    sess = input(f"Сессия (номер) [{SNIPER_SESSION}]: ").strip() or SNIPER_SESSION
+    sess = input(f"Сессия (номер) — Enter = ВСЕ из sniper_session/ ({n_pool} шт.): ").strip()
     txt = input(f"Текст [{SNIPER_TEXT}]: ").strip() or SNIPER_TEXT
 
     audio = find_sniper_audio()
@@ -1298,7 +1316,10 @@ async def run_sniper(config):
         print(f"{c['yel']}Положи музыкальный файл в sniper_audio/ и запусти снова.{c['reset']}")
         return
     print(f"{c['dim']}Файл: {audio.name}. Ctrl+C для остановки.{c['reset']}")
-    await sniper_task(config, ch, txt, sess, audio)
+    if sess:
+        await sniper_task(config, ch, txt, sess, audio)
+    else:
+        await sniper_fleet(config, ch, txt, audio)
 
 
 # ── MEGA import: pull .session files from public folder links ────────────────
@@ -3558,7 +3579,7 @@ async def run_combo(config):
         return
 
     # The sniper runs as a background task so it can fire mid-cycle.
-    sniper = asyncio.create_task(sniper_task(config)) if want_sniper else None
+    sniper = asyncio.create_task(sniper_fleet(config)) if want_sniper else None
 
     interval_hours = config.get("interval_hours", 6)
     random_delay_minutes = config.get("random_delay_minutes", 30)
