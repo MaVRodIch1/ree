@@ -68,18 +68,36 @@ class TgMrkt:
             self.s.headers["Authorization"] = self.token
         return self.token
 
+    def _request(self, method: str, path: str, params=None, body=None):
+        """GET/POST with a light retry on transient blocks (403 Cloudflare, 429
+        rate-limit, 5xx). Re-auths once if the token looks rejected (401/403)."""
+        last = None
+        for attempt in range(3):
+            if method == "GET":
+                r = self.s.get(BASE + path, headers=_headers(), params=params, timeout=30)
+            else:
+                r = self.s.post(BASE + path, headers=_headers(json_body=True),
+                                json=body or {}, timeout=30)
+            if r.ok:
+                return r.json() if r.text else {}
+            last = f"{method} {path} {r.status_code}: {r.text[:200]}"
+            if r.status_code in (403, 429, 500, 502, 503) and attempt < 2:
+                if r.status_code in (401, 403) and not getattr(self, "_reauthed", False):
+                    try:
+                        self.auth()
+                        self._reauthed = True
+                    except Exception:
+                        pass
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            break
+        raise RuntimeError(last)
+
     def _get(self, path: str, params=None):
-        r = self.s.get(BASE + path, headers=_headers(), params=params, timeout=30)
-        if not r.ok:
-            raise RuntimeError(f"GET {path} {r.status_code}: {r.text[:200]}")
-        return r.json()
+        return self._request("GET", path, params=params)
 
     def _post(self, path: str, body: dict):
-        r = self.s.post(BASE + path, headers=_headers(json_body=True),
-                        json=body, timeout=30)
-        if not r.ok:
-            raise RuntimeError(f"POST {path} {r.status_code}: {r.text[:200]}")
-        return r.json()
+        return self._request("POST", path, body=body)
 
     def leaderboard(self, slug: str, count: int = 50, get_finished: bool = False):
         return self._get(f"/leaderboard/{slug}",
