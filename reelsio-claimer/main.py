@@ -1146,14 +1146,15 @@ def find_session_by_name(name):
     """Look in sniper_session/ first — a session kept there is invisible to the
     farm cycles, so the sniper can hold it open without connection clashes."""
     digits = "".join(ch for ch in name if ch.isdigit())
-    pools = (get_session_files(SNIPER_SESSION_DIR)
-             + get_session_files(SESSIONS_DIR)
-             + get_session_files(NEW_SESSIONS_DIR))
+    # Explicit by-name lookup: don't hide dead/excluded (user named it directly).
+    pools = (get_session_files(SNIPER_SESSION_DIR, skip_dead=False)
+             + get_session_files(SESSIONS_DIR, skip_dead=False)
+             + get_session_files(NEW_SESSIONS_DIR, skip_dead=False))
     for p in pools:
         if p.stem == digits:
             return p
     # Any single session dropped into sniper_session/ is used as-is.
-    lone = get_session_files(SNIPER_SESSION_DIR)
+    lone = get_session_files(SNIPER_SESSION_DIR, skip_dead=False)
     return lone[0] if lone else None
 
 
@@ -1293,7 +1294,10 @@ async def sniper_fleet(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
     in sniper_session/ first; if `total` is larger, tops up from the main pool
     (sessions/ then new_sessions/, skipping dead/excluded). Each sniper session is
     locked (BUSY_SESSIONS) so farm cycles don't also open it."""
-    sessions = list(get_session_files(SNIPER_SESSION_DIR))
+    # sniper_session/ is an explicit list the user placed here — do NOT apply the
+    # dead/exclude filters (those are for the farm pool; some sniper accounts are
+    # deliberately in exclude_sessions.txt to keep farm off them).
+    sessions = list(get_session_files(SNIPER_SESSION_DIR, skip_dead=False))
     if total and total > len(sessions):
         have = {sp.stem for sp in sessions}
         for pool in (get_session_files(SESSIONS_DIR),
@@ -1321,7 +1325,7 @@ async def sniper_fleet(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
 async def run_sniper(config):
     c = _C
     print(f"\n{c['cyan']}{c['bold']}🎯 Снайпер комментариев{c['reset']}")
-    n_pool = len(get_session_files(SNIPER_SESSION_DIR))
+    n_pool = len(get_session_files(SNIPER_SESSION_DIR, skip_dead=False))
     ch = input(f"Канал без @ [{SNIPER_CHANNEL}]: ").strip().lstrip("@") or SNIPER_CHANNEL
     sess = input(f"Сессия (номер) — Enter = несколько: ").strip()
     txt = input(f"Текст [{SNIPER_TEXT}]: ").strip() or SNIPER_TEXT
@@ -3595,7 +3599,7 @@ async def run_combo(config):
     ).strip().lower() in ("", "y", "yes", "да")
     sniper_total = 0
     if want_sniper:
-        n_snipe = len(get_session_files(SNIPER_SESSION_DIR))
+        n_snipe = len(get_session_files(SNIPER_SESSION_DIR, skip_dead=False))
         raw = input(f"Сколько сессий на снайпер? (Enter = все из sniper_session/ "
                     f"= {n_snipe}; больше — доберёт из общего пула): ").strip()
         if raw.isdigit():
