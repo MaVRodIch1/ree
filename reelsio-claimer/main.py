@@ -3114,24 +3114,32 @@ def _pvp_coverage_note(board, state):
 
 def _format_player_summary(name, pnl, ton_usd, since_label=""):
     """Personal PvP total for one player across the whole tournament (all
-    opponents) — so a pair H2H isn't mistaken for the total spend. Returns None if
-    the player has no PvP data yet."""
+    opponents) — so a pair H2H isn't mistaken for the total spend. HTML; returns
+    None if the player has no PvP data yet."""
+    import html as _html
     p = (pnl or {}).get(name)
     if not p or p.get("games", 0) <= 0:
         return None
 
     def usd(t):
-        return f" (${round(t * ton_usd):+,})".replace(",", " ") if ton_usd else ""
+        return f" <i>(${round(t * ton_usd):+,})</i>".replace(",", " ") if ton_usd else ""
+
+    def dot(v):
+        return "🟢" if v >= 0 else "🔴"
 
     ton_net = p.get("ton_took_ton", 0) - p.get("ton_bled_ton", 0)
-    head = f"👤 {name} — PvP за турнир" + (f" (с {since_label})" if since_label else "")
-    return (f"{head}:\n"
-            f"  Игр: {p['games']} · винрейт {p['winrate']:.0f}%\n"
-            f"  Потратил всего: {p['bet_ton']:.0f} TON (все ставки: TON+гифты по флору)\n"
-            f"  Забрал у соперников: {p.get('took_ton', 0):.0f} TON · "
-            f"слил: {p.get('bled_ton', 0):.0f} TON\n"
-            f"  ── Нетто с учётом гифтов: {p['net_ton']:+.0f} TON{usd(p['net_ton'])}\n"
-            f"  ── Нетто чистыми TON (как в балансе): {ton_net:+.0f} TON{usd(ton_net)}")
+    nm = _html.escape(name)
+    head = (f"👤 <b>{nm}</b> — PvP за турнир"
+            + (f" <i>(с {since_label})</i>" if since_label else ""))
+    return (f"{head}\n"
+            f"🎮 Игр: <b>{p['games']}</b>  ·  🎯 винрейт <b>{p['winrate']:.0f}%</b>\n"
+            f"💸 Потратил всего: <b>{p['bet_ton']:.0f} TON</b> "
+            f"<i>(все ставки: TON+гифты)</i>\n"
+            f"🟢 Забрал: <b>{p.get('took_ton', 0):.0f}</b>  ·  "
+            f"🔴 Слил: <b>{p.get('bled_ton', 0):.0f}</b>\n"
+            f"{dot(p['net_ton'])} Нетто с гифтами: <b>{p['net_ton']:+.0f} TON</b>{usd(p['net_ton'])}\n"
+            f"{dot(ton_net)} Нетто чистыми TON <i>(как в балансе)</i>: "
+            f"<b>{ton_net:+.0f} TON</b>{usd(ton_net)}")
 
 
 def _free_farmers_note(rows, pnl, ton_usd, since_label="", limit=12, min_games=10):
@@ -3148,10 +3156,6 @@ def _free_farmers_note(rows, pnl, ton_usd, since_label="", limit=12, min_games=1
     Points themselves come from TASKS, not PvP, so this is the material side only.
     Ranked by «забрал»; falls back to net while the cache is still rebuilding."""
     import html as _html
-
-    def usd(t):
-        return f" (~${round(t * ton_usd)})" if ton_usd else ""
-
     cand = []
     for r in rows:
         p = pnl.get(r["name"])
@@ -3163,29 +3167,27 @@ def _free_farmers_note(rows, pnl, ton_usd, since_label="", limit=12, min_games=1
         return None
 
     have_data = any(t > 0 or b > 0 for t, b, _n, _nm in cand)
+    cand.sort(key=lambda x: (x[0] if have_data else x[2]), reverse=True)
+
+    def rowfmt(rank, name, took, bled, net):
+        return f"{rank:>2} {name:<14}{took:>6}{bled:>6}{net:>7}"
+
+    table = [rowfmt("#", "Игрок", "Забрал", "Слил", "Нетто")]
+    for i, (took, bled, net, name) in enumerate(cand[:limit], 1):
+        nm = (name[:13] + "…") if len(name) > 14 else name
+        table.append(rowfmt(i, nm, round(took), round(bled), f"{round(net):+d}"))
+    body = "<pre>" + _html.escape("\n".join(table)) + "</pre>"
+    head = ("💰 <b>Кто больше всех забрал у соперников</b>"
+            + (f" <i>(с {since_label})</i>" if since_label else ""))
     if have_data:
-        cand.sort(key=lambda x: x[0], reverse=True)  # most taken from opponents first
-        head = ("💰 Кто больше всех забрал у соперников в PvP"
-                + (f" — с {since_label}:" if since_label else ":"))
-        note = ("<i>забрал = чужие TON+гифты, выигранные у соперников (свой "
-                "возвращённый гифт не считается); нетто = итог с учётом слитого. "
-                "Очки идут за задания-гифты, не за PvP.</i>")
-        lines = [f"<b>{head}</b>", note]
-        for took, bled, net, name in cand[:limit]:
-            sign = "+" if net >= 0 else ""
-            lines.append(f"• {_html.escape(name)}: забрал {took:.0f} TON{usd(took)} "
-                         f"· слил {bled:.0f} · нетто {sign}{net:.0f}")
+        legend = ("<blockquote>забрал = чужие TON+гифты, выигранные у соперников "
+                  "(свой возвращённый гифт не в счёт) · нетто = итог с учётом "
+                  "слитого · 🔴 минус = сам кормил остальных. Очки идут за "
+                  "задания-гифты, не за PvP.</blockquote>")
     else:
-        # Cache still rebuilding — rank by net so the block still says something.
-        cand.sort(key=lambda x: x[2], reverse=True)
-        head = ("💹 PvP-нетто по игрокам"
-                + (f" — с {since_label}:" if since_label else ":"))
-        note = "<i>разбивка «забрал/слил» догружается; пока — чистый PvP-нетто</i>"
-        lines = [f"<b>{head}</b>", note]
-        for _t, _b, net, name in cand[:limit]:
-            sign = "+" if net >= 0 else ""
-            lines.append(f"• {_html.escape(name)}: нетто {sign}{net:.0f} TON{usd(net)}")
-    return "\n".join(lines)
+        legend = ("<blockquote>разбивка «забрал/слил» догружается — пока показан "
+                  "только PvP-нетто.</blockquote>")
+    return f"{head}\n{body}\n{legend}"
 
 
 def _format_daily(rows, day_ago, limit=15):
@@ -3320,7 +3322,7 @@ async def run_pvp_h2h(config):
         text = _format_h2h(h, await asyncio.to_thread(tgmrkt.ton_usd_rate, TON_USD))
         print(text)
         if input("Отправить это в чат? (y/n) [n]: ").strip().lower() in ("y", "yes", "да"):
-            await client.send_message(TOP_CHAT_ID, text)
+            await client.send_message(TOP_CHAT_ID, text, parse_mode="html")
             print(f"{c['grn']}Отправлено.{c['reset']}")
     except Exception as e:
         print(f"{c['yel']}Ошибка: {e}{c['reset']}")
@@ -3332,36 +3334,43 @@ async def run_pvp_h2h(config):
 
 
 def _format_h2h(h, ton_usd=0.0):
-    a, b = h["me"], h["opp"]
+    """HTML head-to-head card. Send with parse_mode='html'."""
+    import html as _html
+    a, b = _html.escape(str(h["me"])), _html.escape(str(h["opp"]))
 
     def usd(t):
-        return f" (${round(t * ton_usd):+,})".replace(",", " ") if ton_usd else ""
+        return f" <i>(${round(t * ton_usd):+,})</i>".replace(",", " ") if ton_usd else ""
+
+    def dot(v):
+        return "🟢" if v >= 0 else "🔴"
 
     def block(bk, title):
         g = bk["games"]
         if not g:
-            return f"{title}: совместных игр нет"
+            return f"{title} — <i>совместных игр нет</i>"
         wr = 100 * bk["my_wins"] / g
         wrb = 100 * bk["opp_wins"] / g
         lost = bk["a_to_b_ton"]       # a's stake (TON+gift floor) in games a LOST
         won = bk["b_to_a_ton"]        # value a TOOK from b in games a won
         ton_net = bk.get("my_ton_net_ton", bk["my_net_ton"])
-        return (f"{title} — игр: {g}\n"
-                f"  Победы {a}: {bk['my_wins']} ({wr:.0f}%) · {b}: {bk['opp_wins']} ({wrb:.0f}%) · другие: {bk['other_wins']}\n"
-                f"  {a} проиграл (гифты+TON по флору): {lost:.1f} TON{usd(lost)}\n"
-                f"  {a} выиграл (гифты+TON по флору): {won:.1f} TON{usd(won)}\n"
-                f"  ── Нетто с учётом гифтов: {bk['my_net_ton']:+.1f} TON{usd(bk['my_net_ton'])}\n"
-                f"  ── Нетто чистыми TON (как в балансе): {ton_net:+.1f} TON{usd(ton_net)}")
-    note = ("ℹ️ Гифты считаются по флор-цене MRKT. «Нетто с учётом гифтов» — "
-            "итог, где выигранные подарки (кубки и т.п.) уже прибавлены, а "
-            "проигранные вычтены. «Чистыми TON» — только живые TON, как в "
-            "кошельке (подарки не считаются).")
+        return (f"{title} — игр: <b>{g}</b>\n"
+                f"🏆 {a}: <b>{bk['my_wins']}</b> ({wr:.0f}%)  ·  "
+                f"{b}: <b>{bk['opp_wins']}</b> ({wrb:.0f}%)  ·  др.: {bk['other_wins']}\n"
+                f"🔴 {a} проиграл: <b>{lost:.0f} TON</b>{usd(lost)}\n"
+                f"🟢 {a} выиграл: <b>{won:.0f} TON</b>{usd(won)}\n"
+                f"{dot(bk['my_net_ton'])} Нетто с гифтами: "
+                f"<b>{bk['my_net_ton']:+.0f} TON</b>{usd(bk['my_net_ton'])}\n"
+                f"{dot(ton_net)} Нетто чистыми TON: <b>{ton_net:+.0f} TON</b>{usd(ton_net)}")
+
+    note = ("<blockquote>гифты — по флор-цене MRKT · «нетто с гифтами» = итог "
+            "(выигранные подарки прибавлены, проигранные вычтены) · «чистыми TON» "
+            "= только живые TON, как в кошельке.</blockquote>")
     if not h.get("complete", True):
-        note = ("⚠️ История отсканирована не полностью (упёрлись в лимит времени) — "
-                "число игр может быть занижено.\n" + note)
-    return (f"🎯 PvP: {a} vs {b}  (просканировано {h['scanned']} игр)\n\n"
-            f"{block(h['overall'], '▪️ Все совместные игры')}\n\n"
-            f"{block(h['duel'], '⚔️ Только 1-на-1')}\n\n"
+        note = ("⚠️ <i>история отсканирована не полностью — число игр может быть "
+                "занижено.</i>\n" + note)
+    return (f"🎯 <b>PvP: {a} vs {b}</b>  <i>(просканировано {h['scanned']} игр)</i>\n\n"
+            f"{block(h['overall'], '▪️ <b>Все совместные игры</b>')}\n\n"
+            f"{block(h['duel'], '⚔️ <b>Только 1-на-1</b>')}\n\n"
             f"{note}")
 
 
@@ -3527,14 +3536,15 @@ async def fetch_and_post_top(config, session_path):
                             _h2h_label(h2h_player),
                             tgmrkt.pnl_from_state(pvp_state), rate, since_label)
                         if summary:
-                            await client.send_message(TOP_CHAT_ID, summary)
+                            await client.send_message(TOP_CHAT_ID, summary, parse_mode="html")
                     except Exception as e:
                         logger.warning(f"Top: сводка игрока — {e}")
                     posted = 0
                     for o in opps:                       # keep the requested order
                         h = res.get(_h2h_label(o))
                         if h and h["overall"]["games"] > 0:
-                            await client.send_message(TOP_CHAT_ID, _format_h2h(h, rate))
+                            await client.send_message(TOP_CHAT_ID, _format_h2h(h, rate),
+                                                      parse_mode="html")
                             posted += 1
                     _mark_h2h_posted()                   # respect the interval
                     logger.info(f"Top: H2H {_h2h_label(h2h_player)} vs {len(opps)} "
