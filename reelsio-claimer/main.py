@@ -1994,6 +1994,7 @@ def choose_action():
                 ("🎯 Снайпер комментариев (первый коммент)", "sniper"),
                 ("📊 Слежение за топом @mrkt (постить в чат)", "top_tracker"),
                 ("🎯 PvP 1-на-1: я против игрока", "pvp_h2h"),
+                ("📊 PvP: я против Топ-N (разом в чат)", "h2h_top"),
             ])
             if sub:
                 return sub
@@ -3333,6 +3334,83 @@ async def run_pvp_h2h(config):
             pass
 
 
+async def run_h2h_vs_top(config):
+    """One-shot: post the player's PvP summary + a H2H card vs each of the current
+    top-N leaderboard players, straight to the chat."""
+    c = _C
+    player = _h2h_label(config.get("top_h2h_player") or TOP_H2H_PLAYER)
+    print(f"\n{c['cyan']}{c['bold']}📊 PvP: {player} против Топ-N (разом в чат){c['reset']}")
+    session_path = pick_session("PvP vs Топ — сессия @mrkt")
+    if not session_path:
+        return
+    raw = input("Сколько верхних игроков? [4]: ").strip()
+    topn = int(raw) if raw.isdigit() and int(raw) > 0 else 4
+    import tgmrkt
+    api_id, api_hash = int(config["api_id"]), str(config["api_hash"])
+    client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            print(f"{c['yel']}Сессия не авторизована.{c['reset']}")
+            return
+        init_data = await get_menu_webview_init_data(client, MRKT_BOT)
+        photo = _mrkt_photo(init_data)
+        pref = config.get("top_leaderboard_slug") or TOP_LEADERBOARD_SLUG
+
+        def _work():
+            m = tgmrkt.TgMrkt(init_data, photo)
+            m.auth()
+            board = None
+            try:
+                board, _slug = m.leaderboard_auto(pref)
+            except Exception:
+                board = None
+            rows = tgmrkt.extract_rows(board) if board else []
+            opps = [r["name"] for r in rows
+                    if r["name"].lower() != player.lower()][:topn]
+            since = (board.get("timeRange") or {}).get("startAt") \
+                if isinstance(board, dict) else None
+            if not since:
+                since = config.get("top_contest_start")
+            res = m.pvp_h2h_multi(player, opps, since,
+                                  deadline_s=TOP_H2H_DEADLINE) if opps else {}
+            pnl = tgmrkt.pnl_from_state(_load_pvp_state())
+            rate = tgmrkt.ton_usd_rate(TON_USD)
+            since_lbl = ""
+            if since:
+                try:
+                    since_lbl = datetime.fromisoformat(
+                        since.replace("Z", "+00:00")).astimezone(MSK).strftime("%d.%m")
+                except Exception:
+                    since_lbl = ""
+            return opps, res, pnl, rate, since_lbl
+
+        print(f"{c['dim']}Считаю {player} против Топ-{topn}… (может занять минуту){c['reset']}")
+        opps, res, pnl, rate, since_lbl = await asyncio.to_thread(_work)
+        if not opps:
+            print(f"{c['yel']}Не удалось получить топ (лидерборд недоступен).{c['reset']}")
+            return
+        summary = _format_player_summary(player, pnl, rate, since_lbl)
+        if summary:
+            await client.send_message(TOP_CHAT_ID, summary, parse_mode="html")
+        posted = 0
+        for o in opps:
+            h = res.get(o)
+            if h and h["overall"]["games"] > 0:
+                await client.send_message(TOP_CHAT_ID, _format_h2h(h, rate),
+                                          parse_mode="html")
+                posted += 1
+        print(f"{c['grn']}Отправлено в чат: сводка + {posted} H2H "
+              f"(из Топ-{topn}: {', '.join(opps)}).{c['reset']}")
+    except Exception as e:
+        print(f"{c['yel']}Ошибка: {e}{c['reset']}")
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
 def _format_h2h(h, ton_usd=0.0):
     """HTML head-to-head card. Send with parse_mode='html'."""
     import html as _html
@@ -3854,6 +3932,9 @@ async def main():
             return
         if action == "pvp_h2h":
             await run_pvp_h2h(config)
+            return
+        if action == "h2h_top":
+            await run_h2h_vs_top(config)
             return
         if action != "reels":
             print(f"\n{_C['yel']}[{action}] — этот раздел ещё в разработке. Скоро будет!{_C['reset']}\n")
