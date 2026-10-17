@@ -309,21 +309,32 @@ class TgMrkt:
                          max_games: int = 20000, deadline_s: float | None = None):
         return self.scan_pvp(since_iso, (me, opp), max_games, deadline_s)[1]
 
-    def pvp_h2h_multi(self, me: str, opponents, since_iso: str | None = None,
+    def pvp_h2h_multi(self, me, opponents, since_iso: str | None = None,
                       max_games: int = 60000, deadline_s: float | None = None,
                       count: int = 50):
         """One pass over PvP history that builds the head-to-head of `me` against
         EACH opponent at once (cheap — a single scan, not one per opponent).
-        Returns {opponent: h2h_dict}; each dict carries `scanned` and `complete`
-        (False if the scan was cut short by the deadline/cap, so counts may be
-        undercounted)."""
+
+        `me` and each opponent may be a name, a Telegram userId (int/digit-string)
+        or {'name':.., 'id':..}. When an id is given, players are matched by
+        userId — reliable even if nicks repeat or change. Returns {label:
+        h2h_dict}; each dict carries `scanned` and `complete`."""
         started = time.time()
         try:
             rooms = _room_ids(self.game_rooms())
         except Exception:
             rooms = []
-        opps = [o for o in dict.fromkeys(opponents) if o and o != me]
-        buck = {o: {"overall": _blank_h2h(), "duel": _blank_h2h()} for o in opps}
+        me_t = _h2h_target(me)
+        opp_ts, seen_labels = [], set()
+        for o in opponents:
+            t = _h2h_target(o)
+            if not t[1] or t[2] == me_t[2] or t[2] in seen_labels:
+                continue
+            if t[0] == "id" and me_t[0] == "id" and t[1] == me_t[1]:
+                continue
+            seen_labels.add(t[2])
+            opp_ts.append(t)
+        buck = {t[2]: {"overall": _blank_h2h(), "duel": _blank_h2h()} for t in opp_ts}
         seen = 0
         complete = True
         for rid in rooms:
@@ -348,31 +359,49 @@ class TgMrkt:
                         break
                     seen += 1
                     win = g.get("winner") or {}
-                    wname = win.get("publicName")
+                    w_name, w_id = win.get("publicName"), win.get("userId")
                     pot = g.get("totalWinNanoTONs") or 0
                     ton_pot = g.get("totalTonWinNanoTONs") or 0
-                    parts, tparts = {}, {}
+                    by_name, by_id, tby_name, tby_id, nparts = {}, {}, {}, {}, 0
                     for p in g.get("participants") or []:
-                        nm = p.get("publicName")
-                        if nm:
-                            tb = p.get("totalBetNanoTONs") or 0
-                            parts[nm] = tb + (p.get("totalGiftBetsPrice") or 0)
-                            tparts[nm] = tb
-                    if me not in parts:
+                        nm, uid = p.get("publicName"), p.get("userId")
+                        tb = p.get("totalBetNanoTONs") or 0
+                        c = tb + (p.get("totalGiftBetsPrice") or 0)
+                        nparts += 1
+                        if nm is not None:
+                            by_name[nm] = c
+                            tby_name[nm] = tb
+                        if uid is not None:
+                            by_id[uid] = c
+                            tby_id[uid] = tb
+
+                    def contrib(t):
+                        return (by_id if t[0] == "id" else by_name).get(t[1])
+
+                    def tcontrib(t):
+                        return (tby_id if t[0] == "id" else tby_name).get(t[1], 0)
+
+                    def is_win(t):
+                        return (w_id == t[1]) if t[0] == "id" else (w_name == t[1])
+
+                    me_c = contrib(me_t)
+                    if me_c is None:
                         if seen >= max_games:
                             complete = False
                             stop = True
                             break
                         continue
-                    for o in opps:
-                        if o in parts:
-                            _acc_h2h(buck[o]["overall"], me, o, wname, pot,
-                                     parts[me], parts[o], ton_pot,
-                                     tparts.get(me, 0), tparts.get(o, 0))
-                            if len(parts) == 2:
-                                _acc_h2h(buck[o]["duel"], me, o, wname, pot,
-                                         parts[me], parts[o], ton_pot,
-                                         tparts.get(me, 0), tparts.get(o, 0))
+                    me_tc = tcontrib(me_t)
+                    for t in opp_ts:
+                        oc = contrib(t)
+                        if oc is None:
+                            continue
+                        wrel = me_t[2] if is_win(me_t) else (t[2] if is_win(t) else "__other__")
+                        _acc_h2h(buck[t[2]]["overall"], me_t[2], t[2], wrel, pot,
+                                 me_c, oc, ton_pot, me_tc, tcontrib(t))
+                        if nparts == 2:
+                            _acc_h2h(buck[t[2]]["duel"], me_t[2], t[2], wrel, pot,
+                                     me_c, oc, ton_pot, me_tc, tcontrib(t))
                     if seen >= max_games:
                         complete = False
                         stop = True
@@ -383,9 +412,10 @@ class TgMrkt:
             if deadline_s and time.time() - started > deadline_s:
                 complete = False
                 break
-        return {o: {"me": me, "opp": o, "scanned": seen, "complete": complete,
-                    "overall": _h2h_ton(buck[o]["overall"]),
-                    "duel": _h2h_ton(buck[o]["duel"])} for o in opps}
+        return {t[2]: {"me": me_t[2], "opp": t[2], "scanned": seen,
+                       "complete": complete,
+                       "overall": _h2h_ton(buck[t[2]]["overall"]),
+                       "duel": _h2h_ton(buck[t[2]]["duel"])} for t in opp_ts}
 
     def accumulate_pvp(self, state: dict, since_iso: str | None = None,
                        deadline_s: float = 60, max_new: int = 8000) -> int:
@@ -545,6 +575,21 @@ def _num(x):
         return int(float(str(x).replace(" ", "").replace(",", "")))
     except Exception:
         return 0
+
+
+def _h2h_target(x):
+    """Normalize an H2H target spec → (kind, value, label).
+    kind='id' matches a participant's Telegram userId (reliable — nicks repeat
+    or change); kind='name' matches publicName. Accepts a name string, a numeric
+    id (int or digit-string), or a dict {'name':.., 'id':..}."""
+    if isinstance(x, dict):
+        if x.get("id") not in (None, ""):
+            return ("id", int(x["id"]), str(x.get("name") or x["id"]))
+        return ("name", str(x.get("name") or ""), str(x.get("name") or ""))
+    s = str(x).strip()
+    if s.isdigit():
+        return ("id", int(s), s)
+    return ("name", s, s)
 
 
 def _blank_h2h():

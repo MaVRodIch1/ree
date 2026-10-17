@@ -3167,18 +3167,27 @@ def _save_top_snapshot(history, rows):
 
 
 def _h2h_opponents(config) -> list:
-    """The list of opponents to compare the player against."""
+    """The list of opponents to compare the player against. Each entry may be a
+    name, a Telegram userId, or {name, id} — passed through to tgmrkt as-is so it
+    can match by id (reliable) instead of nick."""
     opp = config.get("top_h2h_opponents")
     if isinstance(opp, list) and opp:
-        return [str(o) for o in opp if o]
+        return [o for o in opp if o]
     return list(TOP_H2H_OPPONENTS)
+
+
+def _h2h_label(x) -> str:
+    """Display label for an opponent spec (name string, id, or {name,id})."""
+    if isinstance(x, dict):
+        return str(x.get("name") or x.get("id") or "")
+    return str(x)
 
 
 def _h2h_opponent(config, top1=""):
     """Single opponent for the manual PvP menu default: first configured
     opponent, else the current top-1."""
     opps = _h2h_opponents(config)
-    return (opps[0] if opps else "") or top1
+    return (_h2h_label(opps[0]) if opps else "") or top1
 
 
 def _h2h_due(config=None) -> bool:
@@ -3445,8 +3454,7 @@ async def fetch_and_post_top(config, session_path):
         h2h_on = config.get("top_h2h_auto", TOP_H2H_AUTO)
         if h2h_on and _h2h_due(config):
             h2h_player = config.get("top_h2h_player") or TOP_H2H_PLAYER
-            opps = [o for o in _h2h_opponents(config)
-                    if o and o.lower() != h2h_player.lower()]
+            opps = _h2h_opponents(config)   # names, ids or {name,id}; matched by id
             if h2h_player and opps:
                 since_iso = (payload.get("timeRange") or {}).get("startAt") \
                     if isinstance(payload, dict) else None
@@ -3462,13 +3470,13 @@ async def fetch_and_post_top(config, session_path):
                     res = await asyncio.to_thread(_h2h_scan)
                     posted = 0
                     for o in opps:                       # keep the requested order
-                        h = res.get(o)
+                        h = res.get(_h2h_label(o))
                         if h and h["overall"]["games"] > 0:
                             await client.send_message(TOP_CHAT_ID, _format_h2h(h, rate))
                             posted += 1
                     _mark_h2h_posted()                   # respect the interval
-                    logger.info(f"Top: H2H {h2h_player} vs {len(opps)} игроков — "
-                                f"отправлено {posted}")
+                    logger.info(f"Top: H2H {_h2h_label(h2h_player)} vs {len(opps)} "
+                                f"игроков — отправлено {posted}")
                 except Exception as e:
                     logger.warning(f"Top: H2H — {e}")
     except Exception as e:
