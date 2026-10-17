@@ -92,3 +92,6 @@ dead_sessions.txt
 
 # Cached last-good TON→USD rate
 ton_rate_cache.json
+
+# One-shot H2H-vs-top trigger flag
+top_h2h_once.txt

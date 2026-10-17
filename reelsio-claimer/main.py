@@ -136,6 +136,9 @@ TOP_H2H_OPPONENTS = ["legality", "hundredtrillionusd",
 TOP_H2H_INTERVAL_HOURS = 24     # how often the H2H batch is posted (once a day)
 TOP_H2H_DEADLINE = 1500         # seconds budget for the once-a-day multi-opponent scan
 TOP_H2H_TS_FILE = BASE_DIR / "top_h2h_ts.txt"  # epoch of the last H2H batch post
+# One-shot trigger: create this file (optionally with a number N inside) and the
+# NEXT top post adds a "me vs Top-N" H2H batch once, then deletes the flag.
+TOP_H2H_ONCE_FILE = BASE_DIR / "top_h2h_once.txt"
 # Announce newly-appeared contest tasks (new task templates) to the chat.
 TOP_TASKS_ENABLED = True
 TOP_TASKS_SEEN_FILE = BASE_DIR / "top_tasks_seen.json"  # template ids already announced
@@ -3263,6 +3266,22 @@ def _mark_h2h_posted():
         pass
 
 
+def _h2h_once_requested():
+    """If the one-shot flag file exists, return N (top-N, default 4), else None."""
+    try:
+        txt = TOP_H2H_ONCE_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    return int(txt) if txt.isdigit() and int(txt) > 0 else 4
+
+
+def _clear_h2h_once():
+    try:
+        TOP_H2H_ONCE_FILE.unlink()
+    except Exception:
+        pass
+
+
 async def run_pvp_h2h(config):
     c = _C
     print(f"\n{c['cyan']}{c['bold']}🎯 PvP 1-на-1: ты против игрока{c['reset']}")
@@ -3629,6 +3648,49 @@ async def fetch_and_post_top(config, session_path):
                                 f"игроков — отправлено {posted}")
                 except Exception as e:
                     logger.warning(f"Top: H2H — {e}")
+
+        # One-shot "me vs Top-N" — fires once when the flag file is present,
+        # regardless of the daily interval, then deletes the flag.
+        once_n = _h2h_once_requested()
+        if once_n and rows:
+            player = _h2h_label(config.get("top_h2h_player") or TOP_H2H_PLAYER)
+            top_opps = [r["name"] for r in rows
+                        if r["name"].lower() != player.lower()][:once_n]
+            since_iso = (payload.get("timeRange") or {}).get("startAt") \
+                if isinstance(payload, dict) else None
+            if not since_iso:
+                since_iso = config.get("top_contest_start")
+            since_label = ""
+            if since_iso:
+                try:
+                    since_label = datetime.fromisoformat(
+                        since_iso.replace("Z", "+00:00")).astimezone(MSK).strftime("%d.%m")
+                except Exception:
+                    since_label = ""
+
+            def _once_scan():
+                mm = tgmrkt.TgMrkt(init_data, photo)
+                mm.auth()
+                return mm.pvp_h2h_multi(player, top_opps, since_iso,
+                                        deadline_s=TOP_H2H_DEADLINE)
+            try:
+                res = await asyncio.to_thread(_once_scan)
+                summary = _format_player_summary(
+                    player, tgmrkt.pnl_from_state(pvp_state), rate, since_label)
+                if summary:
+                    await client.send_message(TOP_CHAT_ID, summary, parse_mode="html")
+                posted = 0
+                for o in top_opps:
+                    h = res.get(o)
+                    if h and h["overall"]["games"] > 0:
+                        await client.send_message(TOP_CHAT_ID, _format_h2h(h, rate),
+                                                  parse_mode="html")
+                        posted += 1
+                _clear_h2h_once()   # one-time
+                logger.info(f"Top: разовый H2H {player} vs Топ-{once_n} — "
+                            f"отправлено {posted}")
+            except Exception as e:
+                logger.warning(f"Top: разовый H2H — {e}")
     except Exception as e:
         logger.error(f"Top: ошибка — {e}")
     finally:
