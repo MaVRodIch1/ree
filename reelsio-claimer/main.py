@@ -3127,7 +3127,7 @@ def _format_player_summary(name, pnl, ton_usd, since_label=""):
     head = f"👤 {name} — PvP за турнир" + (f" (с {since_label})" if since_label else "")
     return (f"{head}:\n"
             f"  Игр: {p['games']} · винрейт {p['winrate']:.0f}%\n"
-            f"  Поставил всего: {p['bet_ton']:.0f} TON (TON+гифты по флору)\n"
+            f"  Потратил всего: {p['bet_ton']:.0f} TON (все ставки: TON+гифты по флору)\n"
             f"  Забрал у соперников: {p.get('took_ton', 0):.0f} TON · "
             f"слил: {p.get('bled_ton', 0):.0f} TON\n"
             f"  ── Нетто с учётом гифтов: {p['net_ton']:+.0f} TON{usd(p['net_ton'])}\n"
