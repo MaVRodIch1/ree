@@ -3112,6 +3112,28 @@ def _pvp_coverage_note(board, state):
     return f"⏱ PvP: история догружается ({done}/{total} комнат)"
 
 
+def _format_player_summary(name, pnl, ton_usd, since_label=""):
+    """Personal PvP total for one player across the whole tournament (all
+    opponents) — so a pair H2H isn't mistaken for the total spend. Returns None if
+    the player has no PvP data yet."""
+    p = (pnl or {}).get(name)
+    if not p or p.get("games", 0) <= 0:
+        return None
+
+    def usd(t):
+        return f" (${round(t * ton_usd):+,})".replace(",", " ") if ton_usd else ""
+
+    ton_net = p.get("ton_took_ton", 0) - p.get("ton_bled_ton", 0)
+    head = f"👤 {name} — PvP за турнир" + (f" (с {since_label})" if since_label else "")
+    return (f"{head}:\n"
+            f"  Игр: {p['games']} · винрейт {p['winrate']:.0f}%\n"
+            f"  Поставил всего: {p['bet_ton']:.0f} TON (TON+гифты по флору)\n"
+            f"  Забрал у соперников: {p.get('took_ton', 0):.0f} TON · "
+            f"слил: {p.get('bled_ton', 0):.0f} TON\n"
+            f"  ── Нетто с учётом гифтов: {p['net_ton']:+.0f} TON{usd(p['net_ton'])}\n"
+            f"  ── Нетто чистыми TON (как в балансе): {ton_net:+.0f} TON{usd(ton_net)}")
+
+
 def _free_farmers_note(rows, pnl, ton_usd, since_label="", limit=12, min_games=10):
     """Who pulled the most value OUT of opponents in PvP over the contest.
 
@@ -3493,6 +3515,21 @@ async def fetch_and_post_top(config, session_path):
                                             deadline_s=TOP_H2H_DEADLINE)
                 try:
                     res = await asyncio.to_thread(_h2h_scan)
+                    # Personal total first (all opponents) so a single pair H2H
+                    # isn't mistaken for the whole spend.
+                    try:
+                        since_label = ""
+                        if since_iso:
+                            since_label = datetime.fromisoformat(
+                                since_iso.replace("Z", "+00:00")
+                            ).astimezone(MSK).strftime("%d.%m")
+                        summary = _format_player_summary(
+                            _h2h_label(h2h_player),
+                            tgmrkt.pnl_from_state(pvp_state), rate, since_label)
+                        if summary:
+                            await client.send_message(TOP_CHAT_ID, summary)
+                    except Exception as e:
+                        logger.warning(f"Top: сводка игрока — {e}")
                     posted = 0
                     for o in opps:                       # keep the requested order
                         h = res.get(_h2h_label(o))
