@@ -260,7 +260,7 @@ class TgMrkt:
                     wname = win.get("publicName")
                     pot = g.get("totalWinNanoTONs") or 0
                     ton_pot = g.get("totalTonWinNanoTONs") or 0
-                    parts, tparts = {}, {}
+                    parts, tparts, gparts = {}, {}, {}
                     for p in g.get("participants") or []:
                         nm = p.get("publicName")
                         if not nm:
@@ -269,6 +269,7 @@ class TgMrkt:
                         contrib = tb + (p.get("totalGiftBetsPrice") or 0)
                         parts[nm] = contrib
                         tparts[nm] = tb
+                        gparts[nm] = p.get("totalGiftsCount") or 0
                         ag = agg.setdefault(nm, [0, 0, 0, 0])
                         ag[0] += contrib
                         ag[2] += 1
@@ -278,10 +279,12 @@ class TgMrkt:
                         w[3] += 1     # win count
                     if h2h_pair and a in parts and b in parts:
                         _acc_h2h(overall, a, b, wname, pot, parts[a], parts[b],
-                                 ton_pot, tparts.get(a, 0), tparts.get(b, 0))
+                                 ton_pot, tparts.get(a, 0), tparts.get(b, 0),
+                                 gparts.get(a, 0), gparts.get(b, 0))
                         if len(parts) == 2:
                             _acc_h2h(duel, a, b, wname, pot, parts[a], parts[b],
-                                     ton_pot, tparts.get(a, 0), tparts.get(b, 0))
+                                     ton_pot, tparts.get(a, 0), tparts.get(b, 0),
+                                     gparts.get(a, 0), gparts.get(b, 0))
                     if seen >= max_games:
                         break
                 cursor = data.get("cursor") or ""
@@ -363,23 +366,30 @@ class TgMrkt:
                     pot = g.get("totalWinNanoTONs") or 0
                     ton_pot = g.get("totalTonWinNanoTONs") or 0
                     by_name, by_id, tby_name, tby_id, nparts = {}, {}, {}, {}, 0
+                    gc_name, gc_id = {}, {}
                     for p in g.get("participants") or []:
                         nm, uid = p.get("publicName"), p.get("userId")
                         tb = p.get("totalBetNanoTONs") or 0
                         c = tb + (p.get("totalGiftBetsPrice") or 0)
+                        gc = p.get("totalGiftsCount") or 0
                         nparts += 1
                         if nm is not None:
                             by_name[nm] = c
                             tby_name[nm] = tb
+                            gc_name[nm] = gc
                         if uid is not None:
                             by_id[uid] = c
                             tby_id[uid] = tb
+                            gc_id[uid] = gc
 
                     def contrib(t):
                         return (by_id if t[0] == "id" else by_name).get(t[1])
 
                     def tcontrib(t):
                         return (tby_id if t[0] == "id" else tby_name).get(t[1], 0)
+
+                    def gcontrib(t):
+                        return (gc_id if t[0] == "id" else gc_name).get(t[1], 0)
 
                     def is_win(t):
                         return (w_id == t[1]) if t[0] == "id" else (w_name == t[1])
@@ -392,16 +402,19 @@ class TgMrkt:
                             break
                         continue
                     me_tc = tcontrib(me_t)
+                    me_gc = gcontrib(me_t)
                     for t in opp_ts:
                         oc = contrib(t)
                         if oc is None:
                             continue
                         wrel = me_t[2] if is_win(me_t) else (t[2] if is_win(t) else "__other__")
                         _acc_h2h(buck[t[2]]["overall"], me_t[2], t[2], wrel, pot,
-                                 me_c, oc, ton_pot, me_tc, tcontrib(t))
+                                 me_c, oc, ton_pot, me_tc, tcontrib(t),
+                                 me_gc, gcontrib(t))
                         if nparts == 2:
                             _acc_h2h(buck[t[2]]["duel"], me_t[2], t[2], wrel, pot,
-                                     me_c, oc, ton_pot, me_tc, tcontrib(t))
+                                     me_c, oc, ton_pot, me_tc, tcontrib(t),
+                                     me_gc, gcontrib(t))
                     if seen >= max_games:
                         complete = False
                         stop = True
@@ -595,11 +608,13 @@ def _h2h_target(x):
 def _blank_h2h():
     return {"games": 0, "my_wins": 0, "opp_wins": 0, "other_wins": 0,
             "a_to_b": 0, "b_to_a": 0, "my_net": 0, "opp_net": 0,
-            "my_ton_net": 0, "opp_ton_net": 0}
+            "my_ton_net": 0, "opp_ton_net": 0,
+            "my_gifts_bet": 0, "opp_gifts_bet": 0,
+            "my_gifts_won": 0, "opp_gifts_won": 0}
 
 
 def _acc_h2h(bucket, a, b, winner, pot, a_c, b_c,
-             ton_pot=0, a_ton=0, b_ton=0):
+             ton_pot=0, a_ton=0, b_ton=0, a_gc=0, b_gc=0):
     bucket["games"] += 1
     if winner == a:
         bucket["my_wins"] += 1
@@ -616,6 +631,14 @@ def _acc_h2h(bucket, a, b, winner, pot, a_c, b_c,
     # since won/lost gifts move inventory, not the TON wallet.
     bucket["my_ton_net"] += (ton_pot if winner == a else 0) - a_ton
     bucket["opp_ton_net"] += (ton_pot if winner == b else 0) - b_ton
+    # Gift COUNTS (gifts as items, not value) so recollections like "he staked 7
+    # gifts, I won 1" can be reconciled.
+    bucket["my_gifts_bet"] += a_gc
+    bucket["opp_gifts_bet"] += b_gc
+    if winner == a:
+        bucket["my_gifts_won"] += b_gc      # a took b's gifts
+    elif winner == b:
+        bucket["opp_gifts_won"] += a_gc     # b took a's gifts
 
 
 def _h2h_ton(b):
@@ -624,7 +647,11 @@ def _h2h_ton(b):
             "a_to_b_ton": b["a_to_b"] / 1e9, "b_to_a_ton": b["b_to_a"] / 1e9,
             "my_net_ton": b["my_net"] / 1e9, "opp_net_ton": b["opp_net"] / 1e9,
             "my_ton_net_ton": b.get("my_ton_net", 0) / 1e9,
-            "opp_ton_net_ton": b.get("opp_ton_net", 0) / 1e9}
+            "opp_ton_net_ton": b.get("opp_ton_net", 0) / 1e9,
+            "my_gifts_bet": b.get("my_gifts_bet", 0),
+            "opp_gifts_bet": b.get("opp_gifts_bet", 0),
+            "my_gifts_won": b.get("my_gifts_won", 0),
+            "opp_gifts_won": b.get("opp_gifts_won", 0)}
 
 
 def _looks_like_slug(v: str) -> bool:

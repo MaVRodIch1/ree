@@ -3359,17 +3359,23 @@ def _format_h2h(h, ton_usd=0.0):
         lost = bk["a_to_b_ton"]       # a's stake (TON+gift floor) in games a LOST
         won = bk["b_to_a_ton"]        # value a TOOK from b in games a won
         ton_net = bk.get("my_ton_net_ton", bk["my_net_ton"])
+        my_gb = bk.get("my_gifts_bet", 0)      # gifts (штук) a staked
+        opp_gb = bk.get("opp_gifts_bet", 0)    # gifts b staked
+        my_gw = bk.get("my_gifts_won", 0)      # gifts a won off b
+        opp_gw = bk.get("opp_gifts_won", 0)    # gifts b won off a
         return (f"{title} — игр: <b>{g}</b>\n"
                 f"🏆 {a}: <b>{bk['my_wins']}</b> ({wr:.0f}%)  ·  "
                 f"{b}: <b>{bk['opp_wins']}</b> ({wrb:.0f}%)  ·  др.: {bk['other_wins']}\n"
+                f"🎁 Гифтов ставил: {a} <b>{my_gb}</b> · {b} <b>{opp_gb}</b>\n"
+                f"🎁 Гифтов выиграл: {a} <b>{my_gw}</b> · {b} <b>{opp_gw}</b>\n"
                 f"🔴 {a} проиграл: <b>{lost:.0f} TON</b>{usd(lost)}\n"
                 f"🟢 {a} выиграл: <b>{won:.0f} TON</b>{usd(won)}\n"
                 f"{dot(bk['my_net_ton'])} Нетто с гифтами: "
                 f"<b>{bk['my_net_ton']:+.0f} TON</b>{usd(bk['my_net_ton'])}\n"
                 f"{dot(ton_net)} Нетто чистыми TON: <b>{ton_net:+.0f} TON</b>{usd(ton_net)}")
 
-    note = ("<blockquote>гифты — по флор-цене MRKT · «нетто с гифтами» = итог "
-            "(выигранные подарки прибавлены, проигранные вычтены) · «чистыми TON» "
+    note = ("<blockquote>«ставил/выиграл гифтов» — штуки · остальное в TON "
+            "(гифты по флор-цене MRKT) · «нетто с гифтами» = итог · «чистыми TON» "
             "= только живые TON, как в кошельке.</blockquote>")
     if not h.get("complete", True):
         note = ("⚠️ <i>история отсканирована не полностью — число игр может быть "
