@@ -1286,11 +1286,26 @@ async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
             pass
 
 
-async def sniper_fleet(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT, audio=None):
-    """Run the sniper on EVERY session in sniper_session/ at once — each account
-    comments under new posts independently (more sessions = more comments).
-    Falls back to the single configured session if the folder is empty."""
-    sessions = get_session_files(SNIPER_SESSION_DIR)
+async def sniper_fleet(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
+                       audio=None, total=0):
+    """Run the sniper on multiple sessions at once — each account comments under
+    new posts independently (more sessions = more comments). Uses every session
+    in sniper_session/ first; if `total` is larger, tops up from the main pool
+    (sessions/ then new_sessions/, skipping dead/excluded). Each sniper session is
+    locked (BUSY_SESSIONS) so farm cycles don't also open it."""
+    sessions = list(get_session_files(SNIPER_SESSION_DIR))
+    if total and total > len(sessions):
+        have = {sp.stem for sp in sessions}
+        for pool in (get_session_files(SESSIONS_DIR),
+                     get_session_files(NEW_SESSIONS_DIR)):
+            for sp in pool:
+                if len(sessions) >= total:
+                    break
+                if sp.stem not in have:
+                    sessions.append(sp)
+                    have.add(sp.stem)
+            if len(sessions) >= total:
+                break
     if not sessions:
         await sniper_task(config, channel, text, SNIPER_SESSION, audio)
         return
@@ -1308,8 +1323,14 @@ async def run_sniper(config):
     print(f"\n{c['cyan']}{c['bold']}🎯 Снайпер комментариев{c['reset']}")
     n_pool = len(get_session_files(SNIPER_SESSION_DIR))
     ch = input(f"Канал без @ [{SNIPER_CHANNEL}]: ").strip().lstrip("@") or SNIPER_CHANNEL
-    sess = input(f"Сессия (номер) — Enter = ВСЕ из sniper_session/ ({n_pool} шт.): ").strip()
+    sess = input(f"Сессия (номер) — Enter = несколько: ").strip()
     txt = input(f"Текст [{SNIPER_TEXT}]: ").strip() or SNIPER_TEXT
+    sniper_total = 0
+    if not sess:
+        raw = input(f"Сколько сессий на снайпер? (Enter = все из sniper_session/ "
+                    f"= {n_pool}; больше — доберёт из общего пула): ").strip()
+        if raw.isdigit():
+            sniper_total = int(raw)
 
     audio = find_sniper_audio()
     if not audio:
@@ -1319,7 +1340,7 @@ async def run_sniper(config):
     if sess:
         await sniper_task(config, ch, txt, sess, audio)
     else:
-        await sniper_fleet(config, ch, txt, audio)
+        await sniper_fleet(config, ch, txt, audio, total=sniper_total)
 
 
 # ── MEGA import: pull .session files from public folder links ────────────────
@@ -3572,6 +3593,13 @@ async def run_combo(config):
     want_sniper = input(
         f"Держать снайпер комментариев @{SNIPER_CHANNEL} параллельно? (y/n) [y]: "
     ).strip().lower() in ("", "y", "yes", "да")
+    sniper_total = 0
+    if want_sniper:
+        n_snipe = len(get_session_files(SNIPER_SESSION_DIR))
+        raw = input(f"Сколько сессий на снайпер? (Enter = все из sniper_session/ "
+                    f"= {n_snipe}; больше — доберёт из общего пула): ").strip()
+        if raw.isdigit():
+            sniper_total = int(raw)
 
     want_top = input(
         f"Слежение за топом @{MRKT_BOT} (постить Топ-50 в чат)? (y/n) [n]: "
@@ -3587,7 +3615,7 @@ async def run_combo(config):
         return
 
     # The sniper runs as a background task so it can fire mid-cycle.
-    sniper = asyncio.create_task(sniper_fleet(config)) if want_sniper else None
+    sniper = asyncio.create_task(sniper_fleet(config, total=sniper_total)) if want_sniper else None
 
     interval_hours = config.get("interval_hours", 6)
     random_delay_minutes = config.get("random_delay_minutes", 30)
