@@ -129,15 +129,14 @@ TOP_PVP_STATE_FILE = BASE_DIR / "top_pvp_state.json"  # persistent PvP totals
 TOP_H2H_ENABLED = False         # (legacy hourly top1-vs-top2 — off)
 TOP_H2H_AUTO = True
 TOP_H2H_PLAYER = "lastexiler"   # whose games to compare (override in config.json)
-# Opponents to compare lastexiler against (separate message each). Override in
-# config.json: top_h2h_opponents (list). top1/top2 first, then softers.
-TOP_H2H_OPPONENTS = ["legality", "hundredtrillionusd",
-                     "Gold_3619", "alichaal", "merikosVP"]
+# Extra fixed opponents (besides the auto Top-N). Empty by default — opponents
+# come from the current Top-N. Add names/ids here via config.json top_h2h_opponents.
+TOP_H2H_OPPONENTS = []
 TOP_H2H_INTERVAL_HOURS = 24     # how often the H2H batch is posted (once a day)
 TOP_H2H_DEADLINE = 1500         # seconds budget for the once-a-day multi-opponent scan
 TOP_H2H_TS_FILE = BASE_DIR / "top_h2h_ts.txt"  # epoch of the last H2H batch post
-# Auto H2H opponents also include the current Top-N leaderboard players (0 = off).
-TOP_H2H_TOP_N = 4
+# Auto H2H opponents = the current Top-N leaderboard players (0 = off).
+TOP_H2H_TOP_N = 10
 # Announce newly-appeared contest tasks (new task templates) to the chat.
 TOP_TASKS_ENABLED = True
 TOP_TASKS_SEEN_FILE = BASE_DIR / "top_tasks_seen.json"  # template ids already announced
