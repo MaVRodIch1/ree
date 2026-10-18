@@ -161,7 +161,7 @@ VIEWS_POLL_MINUTES = 15
 SNIPER_CHANNEL = "durov_russia"
 SNIPER_TEXT = "@prosadin - легенда ТОНА"
 SNIPER_SESSION = "380992273859"
-SNIPER_POLL_SEC = 1.0  # backup poll interval for the sniper (push is instant)
+SNIPER_POLL_SEC = 0.5  # backup poll interval (push is primary once subscribed)
 SNIPER_AUDIO_DIR = BASE_DIR / "sniper_audio"
 SNIPER_AUDIO_DIR.mkdir(exist_ok=True)
 # Keep the sniper's own session here so farm cycles never touch it.
@@ -1159,16 +1159,27 @@ def find_session_by_name(name):
     return lone[0] if lone else None
 
 
-async def _sniper_send(client, channel_entity, post_id, text, media, slog):
-    """Post the paid comment under `post_id` as fast as possible."""
-    disc = await client(functions.messages.GetDiscussionMessageRequest(
-        peer=channel_entity, msg_id=post_id))
-    if not disc.messages:
+async def _sniper_send(client, channel_entity, post_id, text, media, slog,
+                       group=None, stars=None):
+    """Post the paid comment under `post_id` as fast as possible. With a
+    pre-resolved discussion `group` (+ its paid-stars price) it's just two round
+    trips: map post → discussion message, then send."""
+    # The post lands in the discussion group a beat after the channel post —
+    # retry quickly instead of giving up on the first empty answer.
+    disc = None
+    for _ in range(15):
+        disc = await client(functions.messages.GetDiscussionMessageRequest(
+            peer=channel_entity, msg_id=post_id))
+        if disc.messages:
+            break
+        await asyncio.sleep(0.2)
+    if not disc or not disc.messages:
         slog.warning(f"post {post_id}: no discussion message")
         return
     disc_msg = disc.messages[0]
-    group = await client.get_entity(disc_msg.peer_id)
-    stars = getattr(group, "send_paid_messages_stars", None)
+    if group is None:
+        group = await client.get_entity(disc_msg.peer_id)
+        stars = getattr(group, "send_paid_messages_stars", None)
 
     await client(functions.messages.SendMediaRequest(
         peer=group,
@@ -1180,6 +1191,32 @@ async def _sniper_send(client, channel_entity, post_id, text, media, slog):
     ))
     slog.info(f"post {post_id}: commented"
               f"{f' for {stars}★' if stars else ''}")
+
+
+async def _sniper_prewarm(client, channel_entity, slog):
+    """Do the slow one-time work up front so the first comment is instant:
+    subscribe to the channel (→ instant push updates instead of waiting on the
+    poll), find its linked discussion group, join it, and cache the group entity
+    and its paid-comment price. Returns (group, stars) or (None, None)."""
+    try:
+        await client(functions.channels.JoinChannelRequest(channel_entity))
+    except Exception as e:
+        slog.debug(f"join channel: {e}")
+    try:
+        full = await client(functions.channels.GetFullChannelRequest(channel_entity))
+        linked = getattr(full.full_chat, "linked_chat_id", None)
+        group = next((ch for ch in full.chats if getattr(ch, "id", None) == linked), None)
+        if group is None:
+            return None, None
+        try:
+            await client(functions.channels.JoinChannelRequest(group))
+        except Exception as e:
+            slog.debug(f"join discussion: {e}")
+        group = await client.get_entity(group)   # fresh, with paid-stars field
+        return group, getattr(group, "send_paid_messages_stars", None)
+    except Exception as e:
+        slog.debug(f"prewarm: {e}")
+        return None, None
 
 
 async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
@@ -1208,6 +1245,12 @@ async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
         return
 
     channel_entity = await client.get_entity(channel)
+    # Subscribe + join the discussion group now, so the first comment isn't
+    # slowed by a join and new posts arrive via instant push.
+    disc_group, disc_stars = await _sniper_prewarm(client, channel_entity, slog)
+    slog.info(f"[{session_path.stem}] подписан на @{channel}, чат-обсуждение "
+              f"{'готов' if disc_group else 'НЕ найден (будет резолвиться на лету)'}"
+              f"{f', коммент {disc_stars}★' if disc_stars else ''}")
 
     # Pre-upload the audio once so the comment goes out with no upload delay.
     uploaded = await client.upload_file(str(audio))
@@ -1235,7 +1278,8 @@ async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
             return
         handled.add(post_id)
         try:
-            await _sniper_send(client, channel_entity, post_id, text, media, slog)
+            await _sniper_send(client, channel_entity, post_id, text, media, slog,
+                               disc_group, disc_stars)
         except Exception as e:
             slog.error(f"comment failed: {e} — retrying with fresh upload")
             try:
@@ -1265,16 +1309,21 @@ async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
         except Exception:
             last_id = 0
         while client.is_connected() and not shutdown_event.is_set():
+            pause = SNIPER_POLL_SEC
             try:
-                msgs = await client.get_messages(channel_entity, limit=5)
+                msgs = await client.get_messages(channel_entity, limit=3)
                 for m in sorted(msgs, key=lambda x: x.id):
                     if m.id > last_id and m.id not in handled:
                         asyncio.create_task(fire(m.id))
                     last_id = max(last_id, m.id)
+            except errors.FloodWaitError as e:
+                # Back off instead of hammering — push still covers us meanwhile.
+                slog.debug(f"poll flood-wait {e.seconds}s")
+                pause = max(SNIPER_POLL_SEC, float(e.seconds))
             except Exception as e:
                 slog.debug(f"poll error: {e}")
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=SNIPER_POLL_SEC)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=pause)
             except asyncio.TimeoutError:
                 pass
 
