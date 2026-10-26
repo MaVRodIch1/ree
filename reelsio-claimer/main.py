@@ -142,6 +142,11 @@ SWAP_BOT = "trade"                                   # override: config swap_bot
 SWAP_WEBAPP_URL = "https://prod-do.swapgift.live/"
 SWAP_POLL_SEC = 5                                    # override: config swap_poll_sec
 SWAP_SNAPSHOT_FILE = BASE_DIR / "swap_exchange_seen.json"  # ids seen in the last poll
+# Where «Обмен» alerts go (separate from the top chat) and the invite link the
+# watcher session uses to join / request to join it. Override in config.json:
+# swap_chat_id, swap_chat_invite.
+SWAP_CHAT_ID = -5525189737
+SWAP_CHAT_INVITE = ""
 # Announce newly-appeared contest tasks (new task templates) to the chat.
 TOP_TASKS_ENABLED = True
 TOP_TASKS_SEEN_FILE = BASE_DIR / "top_tasks_seen.json"  # template ids already announced
@@ -3689,9 +3694,42 @@ def _save_swap_snapshot(ids):
         pass
 
 
+async def _swap_join_chat(client, invite: str, label: str):
+    """Join (or send a join request to) the alerts chat via its invite link.
+    Accepts t.me/+HASH, t.me/joinchat/HASH or a public t.me/username."""
+    link = (invite or "").strip()
+    if not link:
+        return
+    tail = link.split("t.me/", 1)[-1].strip("/")
+    try:
+        if tail.startswith("+") or tail.startswith("joinchat/"):
+            h = tail.split("/", 1)[-1].lstrip("+")
+            await client(functions.messages.ImportChatInviteRequest(h))
+        else:
+            await client(functions.channels.JoinChannelRequest(tail))
+        logger.info(f"Обмен: [{label}] вступил в чат для уведомлений")
+    except errors.UserAlreadyParticipantError:
+        pass
+    except errors.InviteRequestSentError:
+        logger.info(f"Обмен: [{label}] заявка на вступление отправлена — "
+                    f"одобри её в чате, и уведомления пойдут туда")
+    except Exception as e:
+        logger.warning(f"Обмен: [{label}] не удалось вступить в чат — {e}")
+
+
+async def _swap_send(client, chat_id, text):
+    """Send an alert; if the chat isn't in the session's entity cache yet (fresh
+    join), refresh dialogs once and retry."""
+    try:
+        await client.send_message(chat_id, text, parse_mode="html", link_preview=False)
+    except ValueError:
+        await client.get_dialogs()
+        await client.send_message(chat_id, text, parse_mode="html", link_preview=False)
+
+
 async def swap_watch_task(config, session_path):
     """Poll the @trade «Обмен» tab every few seconds; post newly-listed gifts to
-    TOP_CHAT_ID right away. Holds its own session open (must differ from the
+    the swap alerts chat (SWAP_CHAT_ID) right away. Holds its own session open (must differ from the
     top-tracker session — one .session can't be open twice)."""
     import swapgift
     bot = config.get("swap_bot") or SWAP_BOT
@@ -3705,7 +3743,9 @@ async def swap_watch_task(config, session_path):
         await client.disconnect()
         return
     BUSY_SESSIONS.add(label)    # keep farm/views off this session
-    logger.info(f"Обмен: слежу за @{bot} «Обмен» ({label}, каждые {poll:g}с)")
+    chat_id = int(config.get("swap_chat_id") or SWAP_CHAT_ID)
+    await _swap_join_chat(client, config.get("swap_chat_invite") or SWAP_CHAT_INVITE, label)
+    logger.info(f"Обмен: слежу за @{bot} «Обмен» ({label}, каждые {poll:g}с) → чат {chat_id}")
     prev = _load_swap_snapshot()
     sg = None
     fails = 0
@@ -3723,9 +3763,7 @@ async def swap_watch_task(config, session_path):
                 else:
                     new = [it for it in items if str(it.get("id")) not in prev]
                     if new:
-                        await client.send_message(
-                            TOP_CHAT_ID, swapgift.format_new_items(new),
-                            parse_mode="html", link_preview=False)
+                        await _swap_send(client, chat_id, swapgift.format_new_items(new))
                         logger.info(f"Обмен: новых подарков — {len(new)}, отправлено в чат")
                 if ids != prev:
                     _save_swap_snapshot(ids)
