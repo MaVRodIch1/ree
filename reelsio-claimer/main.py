@@ -146,7 +146,7 @@ SWAP_SNAPSHOT_FILE = BASE_DIR / "swap_exchange_seen.json"  # ids seen in the las
 # watcher session uses to join / request to join it. Override in config.json:
 # swap_chat_id, swap_chat_invite.
 SWAP_CHAT_ID = -5525189737
-SWAP_CHAT_INVITE = ""
+SWAP_CHAT_INVITE = "https://t.me/+Zg8BO4sSijtmZWQy"
 # Announce newly-appeared contest tasks (new task templates) to the chat.
 TOP_TASKS_ENABLED = True
 TOP_TASKS_SEEN_FILE = BASE_DIR / "top_tasks_seen.json"  # template ids already announced
