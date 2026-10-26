@@ -3749,6 +3749,10 @@ async def swap_watch_task(config, session_path):
     prev = _load_swap_snapshot()
     sg = None
     fails = 0
+    # One test message per start so you can see the chain works end-to-end
+    # (login → exchange list → chat). Off: config swap_test_on_start=false.
+    test_pending = bool(config.get("swap_test_on_start", True))
+    test_fails = 0
     try:
         while not shutdown_event.is_set():
             try:
@@ -3758,6 +3762,24 @@ async def swap_watch_task(config, session_path):
                     await asyncio.to_thread(sg.auth)
                 items = await asyncio.to_thread(sg.exchange_assets)
                 ids = {str(it.get("id")) for it in items if it.get("id") is not None}
+                if test_pending:
+                    try:
+                        sample = sorted(items, key=lambda x: x.get("exchangePriceTon") or 0)[:3]
+                        title = (f"🧪 <b>Тест: уведомления «Обмена» работают</b>\n"
+                                 f"<i>Сейчас в Обмене {len(items)} подарков. Пример того, "
+                                 f"как будут выглядеть алерты:</i>")
+                        text = (swapgift.format_new_items(sample, title=title) if sample
+                                else title.replace("Пример того, как будут выглядеть алерты:",
+                                                   "Как появится новый — пришлю сюда."))
+                        await _swap_send(client, chat_id, text)
+                        test_pending = False
+                        logger.info("Обмен: тестовое уведомление отправлено в чат")
+                    except Exception as e:
+                        # e.g. join request not approved yet — retry next poll
+                        test_fails += 1
+                        if test_fails == 1 or test_fails % 60 == 0:
+                            logger.warning(f"Обмен: тест не отправлен ({e}) — "
+                                           f"повторяю (одобрена ли заявка в чат?)")
                 if prev is None:
                     logger.info(f"Обмен: сейчас {len(ids)} подарков — жду новые")
                 else:

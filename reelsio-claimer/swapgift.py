@@ -114,11 +114,12 @@ def _pct(permille):
     return f"{permille / 10:g}%" if isinstance(permille, (int, float)) else "—"
 
 
-def format_new_items(items, ton_usd: float = 0.0, limit: int = 10) -> str:
-    """HTML announcement for freshly-listed exchange gifts."""
+def format_new_items(items, ton_usd: float = 0.0, limit: int = 10, title: str = "") -> str:
+    """HTML announcement for freshly-listed exchange gifts. `title` overrides the
+    header (used for the startup test message)."""
     import html as _h
-    head = ("🔔 <b>Новый подарок в Обмене</b>" if len(items) == 1
-            else f"🔔 <b>Новые подарки в Обмене: {len(items)}</b>")
+    head = title or ("🔔 <b>Новый подарок в Обмене</b>" if len(items) == 1
+                     else f"🔔 <b>Новые подарки в Обмене: {len(items)}</b>")
     lines = [head]
     for it in sorted(items, key=lambda x: x.get("exchangePriceTon") or 0)[:limit]:
         name = _h.escape(f"{it.get('name') or '?'} #{it.get('giftNumber') or '?'}")
