@@ -137,6 +137,11 @@ TOP_H2H_DEADLINE = 1500         # seconds budget for the once-a-day multi-oppone
 TOP_H2H_TS_FILE = BASE_DIR / "top_h2h_ts.txt"  # epoch of the last H2H batch post
 # Auto H2H opponents = the current Top-N leaderboard players (0 = off).
 TOP_H2H_TOP_N = 10
+# SwapGift (@trade) «Обмен» watcher: announce newly-listed gifts to TOP_CHAT_ID.
+SWAP_BOT = "trade"                                   # override: config swap_bot
+SWAP_WEBAPP_URL = "https://prod-do.swapgift.live/"
+SWAP_POLL_SEC = 5                                    # override: config swap_poll_sec
+SWAP_SNAPSHOT_FILE = BASE_DIR / "swap_exchange_seen.json"  # ids seen in the last poll
 # Announce newly-appeared contest tasks (new task templates) to the chat.
 TOP_TASKS_ENABLED = True
 TOP_TASKS_SEEN_FILE = BASE_DIR / "top_tasks_seen.json"  # template ids already announced
@@ -1338,7 +1343,7 @@ async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
 
 
 async def sniper_fleet(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
-                       audio=None, total=0):
+                       audio=None, total=0, exclude=()):
     """Run the sniper on multiple sessions at once — each account comments under
     new posts independently (more sessions = more comments). Uses every session
     in sniper_session/ first; if `total` is larger, tops up from the main pool
@@ -1349,7 +1354,7 @@ async def sniper_fleet(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
     # deliberately in exclude_sessions.txt to keep farm off them).
     sessions = list(get_session_files(SNIPER_SESSION_DIR, skip_dead=False))
     if total and total > len(sessions):
-        have = {sp.stem for sp in sessions}
+        have = {sp.stem for sp in sessions} | set(exclude)
         for pool in (get_session_files(SESSIONS_DIR),
                      get_session_files(NEW_SESSIONS_DIR)):
             for sp in pool:
@@ -3651,6 +3656,104 @@ async def top_tracker_task(config, session_path, pause_event=None):
             pass
 
 
+async def get_swap_init_data(client, bot_username: str) -> str:
+    """initData for the SwapGift mini-app (@trade). Uses the bot's menu-button
+    URL when it has one, else the known app URL."""
+    bot = await client.get_entity(bot_username)
+    url = SWAP_WEBAPP_URL
+    try:
+        full = await client(functions.users.GetFullUserRequest(bot))
+        menu = full.full_user.bot_info.menu_button if full.full_user.bot_info else None
+        url = getattr(menu, "url", None) or url
+    except Exception:
+        pass
+    result = await client(functions.messages.RequestWebViewRequest(
+        peer=bot, bot=bot, platform="android", from_bot_menu=True, url=url))
+    init_data = parse_qs(urlparse(result.url).fragment).get("tgWebAppData", [None])[0]
+    if not init_data:
+        raise RuntimeError(f"tgWebAppData not found in @{bot_username} webview URL")
+    return init_data
+
+
+def _load_swap_snapshot():
+    try:
+        return set(json.loads(SWAP_SNAPSHOT_FILE.read_text(encoding="utf-8")))
+    except Exception:
+        return None
+
+
+def _save_swap_snapshot(ids):
+    try:
+        SWAP_SNAPSHOT_FILE.write_text(json.dumps(sorted(ids)), encoding="utf-8")
+    except Exception:
+        pass
+
+
+async def swap_watch_task(config, session_path):
+    """Poll the @trade «Обмен» tab every few seconds; post newly-listed gifts to
+    TOP_CHAT_ID right away. Holds its own session open (must differ from the
+    top-tracker session — one .session can't be open twice)."""
+    import swapgift
+    bot = config.get("swap_bot") or SWAP_BOT
+    poll = float(config.get("swap_poll_sec") or SWAP_POLL_SEC)
+    label = session_path.stem
+    client = TelegramClient(str(session_path.with_suffix("")),
+                            int(config["api_id"]), str(config["api_hash"]))
+    await client.connect()
+    if not await client.is_user_authorized():
+        logger.error(f"Обмен: сессия {label} не авторизована — слежение не запущено")
+        await client.disconnect()
+        return
+    BUSY_SESSIONS.add(label)    # keep farm/views off this session
+    logger.info(f"Обмен: слежу за @{bot} «Обмен» ({label}, каждые {poll:g}с)")
+    prev = _load_swap_snapshot()
+    sg = None
+    fails = 0
+    try:
+        while not shutdown_event.is_set():
+            try:
+                if sg is None:
+                    init = await get_swap_init_data(client, bot)
+                    sg = swapgift.SwapGift(init)
+                    await asyncio.to_thread(sg.auth)
+                items = await asyncio.to_thread(sg.exchange_assets)
+                ids = {str(it.get("id")) for it in items if it.get("id") is not None}
+                if prev is None:
+                    logger.info(f"Обмен: сейчас {len(ids)} подарков — жду новые")
+                else:
+                    new = [it for it in items if str(it.get("id")) not in prev]
+                    if new:
+                        await client.send_message(
+                            TOP_CHAT_ID, swapgift.format_new_items(new),
+                            parse_mode="html", link_preview=False)
+                        logger.info(f"Обмен: новых подарков — {len(new)}, отправлено в чат")
+                if ids != prev:
+                    _save_swap_snapshot(ids)
+                prev = ids
+                fails = 0
+                pause = poll
+            except swapgift.Unauthorized:
+                sg = None              # token expired → fresh initData + re-auth
+                pause = 1
+            except Exception as e:
+                fails += 1
+                if fails in (1, 5) or fails % 20 == 0:
+                    logger.warning(f"Обмен: ошибка ({fails}) — {e}")
+                if fails >= 3:
+                    sg = None
+                pause = min(60, poll * (2 ** min(fails, 4)))
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=pause)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        BUSY_SESSIONS.discard(label)
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
 async def run_top_tracker(config):
     c = _C
     print(f"\n{c['cyan']}{c['bold']}📊 Слежение за топом @{MRKT_BOT}{c['reset']}")
@@ -3735,12 +3838,33 @@ async def run_combo(config):
         if not top_session:
             want_top = False
 
+    swap_bot = config.get("swap_bot") or SWAP_BOT
+    want_swap = input(
+        f"Следить за «Обменом» @{swap_bot} (уведомлять о новых подарках в чат)? (y/n) [y]: "
+    ).strip().lower() in ("", "y", "yes", "да")
+    swap_session = None
+    if want_swap:
+        swap_session = pick_session("Обмен @trade — сессия (НЕ та, что для топа)")
+        if swap_session and top_session and swap_session.stem == top_session.stem:
+            print(f"{c['yel']}Эта сессия уже занята слежением за топом — одну .session "
+                  f"нельзя держать открытой дважды. Выбери другую.{c['reset']}")
+            swap_session = pick_session("Обмен @trade — другая сессия")
+            if swap_session and swap_session.stem == top_session.stem:
+                swap_session = None
+        if not swap_session:
+            want_swap = False
+
     if input("Запустить комбо? (yes/n): ").strip().lower() not in ("yes", "y", "да"):
         print(f"{c['dim']}Отменено.{c['reset']}")
         return
 
-    # The sniper runs as a background task so it can fire mid-cycle.
-    sniper = asyncio.create_task(sniper_fleet(config, total=sniper_total)) if want_sniper else None
+    # The sniper runs as a background task so it can fire mid-cycle. Its pool
+    # top-up must not grab the sessions the tracker / swap watcher hold open.
+    held = {s.stem for s in (top_session, swap_session) if s}
+    sniper = asyncio.create_task(
+        sniper_fleet(config, total=sniper_total, exclude=held)) if want_sniper else None
+    # «Обмен» watcher — new gifts in @trade → chat, within seconds.
+    swap = asyncio.create_task(swap_watch_task(config, swap_session)) if want_swap else None
 
     interval_hours = config.get("interval_hours", 6)
     random_delay_minutes = config.get("random_delay_minutes", 30)
@@ -3835,6 +3959,8 @@ async def run_combo(config):
             active.append("слежение за топом")
         if want_views:
             active.append("просмотры канала")
+        if want_swap:
+            active.append("обмен @trade")
         logger.info(f"Combo: Рилс выключен — работает: "
                     f"{', '.join(active) or 'ничего (включи топ или просмотры)'}")
         await shutdown_event.wait()
@@ -3857,6 +3983,8 @@ async def run_combo(config):
 
     if sniper:
         sniper.cancel()
+    if swap:
+        swap.cancel()
     if views:
         views.cancel()
     if top:

@@ -93,3 +93,6 @@ dead_sessions.txt
 # Cached last-good TON→USD rate
 ton_rate_cache.json
 
+
+# SwapGift «Обмен» watcher: ids seen in the last poll
+swap_exchange_seen.json
