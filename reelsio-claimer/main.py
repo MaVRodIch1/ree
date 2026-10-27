@@ -1246,8 +1246,11 @@ async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
         slog.error("no audio file in sniper_audio/ — put an .mp3 there")
         return
 
+    # Long-lived connection: never give up reconnecting after a network outage
+    # (Telethon's default gives up after 5 tries and the sniper silently dies).
     client = TelegramClient(str(session_path.with_suffix("")),
-                            int(config["api_id"]), str(config["api_hash"]))
+                            int(config["api_id"]), str(config["api_hash"]),
+                            connection_retries=-1, retry_delay=5)
     await client.connect()
     if not await client.is_user_authorized():
         slog.error(f"session {session_path.stem} not authorized")
@@ -1318,27 +1321,46 @@ async def sniper_task(config, channel=SNIPER_CHANNEL, text=SNIPER_TEXT,
             last_id = latest[0].id if latest else 0
         except Exception:
             last_id = 0
-        while client.is_connected() and not shutdown_event.is_set():
+        down_logged = False
+        while not shutdown_event.is_set():
             pause = SNIPER_POLL_SEC
-            try:
-                msgs = await client.get_messages(channel_entity, limit=3)
-                for m in sorted(msgs, key=lambda x: x.id):
-                    if m.id > last_id and m.id not in handled:
-                        asyncio.create_task(fire(m.id))
-                    last_id = max(last_id, m.id)
-            except errors.FloodWaitError as e:
-                # Back off instead of hammering — push still covers us meanwhile.
-                slog.debug(f"poll flood-wait {e.seconds}s")
-                pause = max(SNIPER_POLL_SEC, float(e.seconds))
-            except Exception as e:
-                slog.debug(f"poll error: {e}")
+            if not client.is_connected():
+                # Network/Telegram dropped — keep trying to come back instead of
+                # exiting (push handlers resume by themselves once reconnected).
+                if not down_logged:
+                    slog.warning(f"[{session_path.stem}] связь потеряна — переподключаюсь…")
+                    down_logged = True
+                try:
+                    await client.connect()
+                except Exception as e:
+                    slog.debug(f"reconnect: {e}")
+                if client.is_connected():
+                    slog.info(f"[{session_path.stem}] снова на связи")
+                    down_logged = False
+                else:
+                    pause = 15
+            else:
+                try:
+                    msgs = await client.get_messages(channel_entity, limit=3)
+                    for m in sorted(msgs, key=lambda x: x.id):
+                        if m.id > last_id and m.id not in handled:
+                            asyncio.create_task(fire(m.id))
+                        last_id = max(last_id, m.id)
+                except errors.FloodWaitError as e:
+                    # Back off instead of hammering — push still covers us meanwhile.
+                    slog.debug(f"poll flood-wait {e.seconds}s")
+                    pause = max(SNIPER_POLL_SEC, float(e.seconds))
+                except Exception as e:
+                    slog.debug(f"poll error: {e}")
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=pause)
             except asyncio.TimeoutError:
                 pass
 
     try:
-        await asyncio.gather(client.run_until_disconnected(), poll_loop())
+        # poll_loop is the keep-alive: it outlives outages and reconnects, so a
+        # dropped connection no longer ends the sniper.
+        await poll_loop()
     finally:
         BUSY_SESSIONS.discard(session_path.stem)
         try:
@@ -3717,26 +3739,76 @@ async def _swap_join_chat(client, invite: str, label: str):
         logger.warning(f"Обмен: [{label}] не удалось вступить в чат — {e}")
 
 
-async def _swap_send(client, chat_id, text):
-    """Send an alert; if the chat isn't in the session's entity cache yet (fresh
-    join), refresh dialogs once and retry."""
+def _invite_tail(invite: str) -> str:
+    return (invite or "").strip().split("t.me/", 1)[-1].strip("/")
+
+
+def _invite_hash(invite: str):
+    tail = _invite_tail(invite)
+    if tail.startswith("+") or tail.startswith("joinchat/"):
+        return tail.split("/", 1)[-1].lstrip("+")
+    return None
+
+
+async def _follow_migration(client, ent):
+    """A basic group upgraded to a supergroup keeps a pointer to its new self
+    (migrated_to); the old -XXXXXXXXXX id stops working ('invalid Peer')."""
+    mig = getattr(ent, "migrated_to", None)
+    if mig is not None:
+        try:
+            return await client.get_entity(
+                types.InputPeerChannel(mig.channel_id, mig.access_hash))
+        except Exception:
+            pass
+    return ent
+
+
+async def _swap_resolve_chat(client, invite: str, fallback_id: int, label: str):
+    """Find the alerts chat as it exists *now*. Prefer the invite link — it keeps
+    working after a group→supergroup upgrade, when the numeric id changes. Joins
+    (or requests to join) if the session isn't a member yet."""
+    h = _invite_hash(invite)
+    if h:
+        for attempt in range(2):
+            try:
+                r = await client(functions.messages.CheckChatInviteRequest(h))
+            except Exception as e:
+                logger.debug(f"Обмен: проверка ссылки — {e}")
+                break
+            if isinstance(r, types.ChatInviteAlready) and getattr(r, "chat", None):
+                return await _follow_migration(client, r.chat)
+            if attempt == 0:
+                await _swap_join_chat(client, invite, label)
+    elif _invite_tail(invite):
+        await _swap_join_chat(client, invite, label)
+        try:
+            return await client.get_entity(_invite_tail(invite))
+        except Exception:
+            pass
     try:
-        await client.send_message(chat_id, text, parse_mode="html", link_preview=False)
-    except ValueError:
-        await client.get_dialogs()
-        await client.send_message(chat_id, text, parse_mode="html", link_preview=False)
+        try:
+            ent = await client.get_entity(fallback_id)
+        except ValueError:
+            await client.get_dialogs()
+            ent = await client.get_entity(fallback_id)
+        return await _follow_migration(client, ent)
+    except Exception:
+        return fallback_id
 
 
 async def swap_watch_task(config, session_path):
     """Poll the @trade «Обмен» tab every few seconds; post newly-listed gifts to
-    the swap alerts chat (SWAP_CHAT_ID) right away. Holds its own session open (must differ from the
-    top-tracker session — one .session can't be open twice)."""
+    the swap alerts chat right away. Holds its own session open (must differ from
+    the top-tracker session — one .session can't be open twice)."""
     import swapgift
+    from telethon import utils as tg_utils
     bot = config.get("swap_bot") or SWAP_BOT
     poll = float(config.get("swap_poll_sec") or SWAP_POLL_SEC)
     label = session_path.stem
+    # Long-lived connection: keep reconnecting through outages forever.
     client = TelegramClient(str(session_path.with_suffix("")),
-                            int(config["api_id"]), str(config["api_hash"]))
+                            int(config["api_id"]), str(config["api_hash"]),
+                            connection_retries=-1, retry_delay=5)
     await client.connect()
     if not await client.is_user_authorized():
         logger.error(f"Обмен: сессия {label} не авторизована — слежение не запущено")
@@ -3744,8 +3816,32 @@ async def swap_watch_task(config, session_path):
         return
     BUSY_SESSIONS.add(label)    # keep farm/views off this session
     chat_id = int(config.get("swap_chat_id") or SWAP_CHAT_ID)
-    await _swap_join_chat(client, config.get("swap_chat_invite") or SWAP_CHAT_INVITE, label)
-    logger.info(f"Обмен: слежу за @{bot} «Обмен» ({label}, каждые {poll:g}с) → чат {chat_id}")
+    invite = config.get("swap_chat_invite") or SWAP_CHAT_INVITE
+    target = await _swap_resolve_chat(client, invite, chat_id, label)
+
+    def _target_desc(t):
+        try:
+            return f"«{getattr(t, 'title', '')}» (id {tg_utils.get_peer_id(t)})"
+        except Exception:
+            return str(t)
+
+    logger.info(f"Обмен: слежу за @{bot} «Обмен» ({label}, каждые {poll:g}с) → "
+                f"{_target_desc(target)}")
+
+    async def send(text):
+        # If the chat moved (group→supergroup) or the cached peer went stale,
+        # re-resolve it via the invite link and retry once.
+        nonlocal target
+        try:
+            await client.send_message(target, text, parse_mode="html", link_preview=False)
+        except errors.FloodWaitError:
+            raise
+        except Exception as e:
+            old = _target_desc(target)
+            target = await _swap_resolve_chat(client, invite, chat_id, label)
+            logger.info(f"Обмен: чат недоступен ({e}) — {old} → {_target_desc(target)}")
+            await client.send_message(target, text, parse_mode="html", link_preview=False)
+
     prev = _load_swap_snapshot()
     sg = None
     fails = 0
@@ -3755,6 +3851,17 @@ async def swap_watch_task(config, session_path):
     test_fails = 0
     try:
         while not shutdown_event.is_set():
+            if not client.is_connected():
+                try:
+                    await client.connect()
+                except Exception:
+                    pass
+                if not client.is_connected():
+                    try:
+                        await asyncio.wait_for(shutdown_event.wait(), timeout=15)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
             try:
                 if sg is None:
                     init = await get_swap_init_data(client, bot)
@@ -3771,7 +3878,7 @@ async def swap_watch_task(config, session_path):
                         text = (swapgift.format_new_items(sample, title=title) if sample
                                 else title.replace("Пример того, как будут выглядеть алерты:",
                                                    "Как появится новый — пришлю сюда."))
-                        await _swap_send(client, chat_id, text)
+                        await send(text)
                         test_pending = False
                         logger.info("Обмен: тестовое уведомление отправлено в чат")
                     except Exception as e:
@@ -3785,7 +3892,7 @@ async def swap_watch_task(config, session_path):
                 else:
                     new = [it for it in items if str(it.get("id")) not in prev]
                     if new:
-                        await _swap_send(client, chat_id, swapgift.format_new_items(new))
+                        await send(swapgift.format_new_items(new))
                         logger.info(f"Обмен: новых подарков — {len(new)}, отправлено в чат")
                 if ids != prev:
                     _save_swap_snapshot(ids)
