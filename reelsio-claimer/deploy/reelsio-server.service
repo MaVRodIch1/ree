@@ -1,0 +1,18 @@
+[Unit]
+Description=reelsio-claimer server mode (channel views + @trade Обмен watcher)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reelsio
+WorkingDirectory=/opt/reelsio/reelsio-claimer
+ExecStart=/opt/reelsio/venv/bin/python main.py server
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=20
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

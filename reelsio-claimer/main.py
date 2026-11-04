@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -166,6 +167,15 @@ VIEWS_SPREAD_HOURS = 16
 VIEWS_LOOKBACK_HOURS = 48
 # How often the combo monitor checks the channel for new posts (minutes).
 VIEWS_POLL_MINUTES = 15
+# Organic "drip" (combo + server): not every account sees every post, and the
+# views trickle in over VIEWS_SPREAD_HOURS like a real audience — most in the
+# first hours, then a long tail. All overridable in config.json.
+VIEWS_SHARE = (0.55, 0.85)    # config views_share: [min, max] — share of accounts per post
+VIEWS_CATCHUP = 0.3           # config views_catchup: chance a viewer also opens older posts
+VIEWS_PARALLEL = 3            # config views_parallel: accounts viewing at the same moment
+VIEWS_NIGHT = (2, 7)          # config views_night: audience's local hours with few views
+VIEWS_TZ_OFFSET = 3           # config views_tz: audience's UTC offset (Moscow = 3)
+VIEWS_PLAN_FILE = BASE_DIR / "views_plan.json"   # schedule survives restarts
 
 # Comment sniper: first paid comment under every new post of a channel
 SNIPER_CHANNEL = "durov_russia"
@@ -1114,6 +1124,251 @@ async def views_cycle(config, sessions, channel=VIEWS_CHANNEL, hours=24, quiet=F
                 pass
 
     log("info", f"Views cycle complete — сессий живо: {alive}/{alive + dead}")
+
+
+# ── Organic views drip ───────────────────────────────────────────────────────
+# Instead of every account hitting every post at once, each new post gets its
+# own plan: a random share of accounts (some accounts are "regulars", some are
+# lurkers), each scheduled at a random moment — front-loaded like a real
+# audience (≈⅓ in the first hour, median ≈3h, tail to ~16h), fewer at night.
+# The plan lives in views_plan.json so a restart (server/systemd) resumes it.
+
+def _views_load_plan(channel):
+    try:
+        d = json.loads(VIEWS_PLAN_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        d = {}
+    if d.get("channel") != channel:
+        d = {"channel": channel}
+    d.setdefault("last_id", None)
+    d.setdefault("plan", [])      # [due_ts, label, [ids], tries]
+    d.setdefault("recent", [])    # [[ids], post_ts] — for catch-up views
+    d.setdefault("done", 0)
+    return d
+
+
+def _views_save_plan(d):
+    try:
+        tmp = VIEWS_PLAN_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d), encoding="utf-8")
+        os.replace(tmp, VIEWS_PLAN_FILE)
+    except Exception as e:
+        logger.warning(f"Просмотры: не смог сохранить план: {e}")
+
+
+def _account_activity(label):
+    """Stable per-account activity weight 0.35..1.0 — the same accounts tend to
+    be the 'regulars', the way a real audience isn't uniformly random."""
+    h = int(hashlib.sha1(label.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    return 0.35 + 0.65 * h
+
+
+def _views_due_ts(window_s, config):
+    """When one account views the post: front-loaded curve + night damping."""
+    ts = time.time() + random.uniform(45, 240) + window_s * random.random() ** 2.5
+    night = config.get("views_night") or VIEWS_NIGHT
+    tz = float(config.get("views_tz", VIEWS_TZ_OFFSET))
+    lt = time.gmtime(ts + tz * 3600)
+    a, b = int(night[0]), int(night[1])
+    if a <= lt.tm_hour < b and random.random() < 0.75:
+        # Asleep: push it to the morning, spread over the first ~3 waking hours.
+        ts += (b - lt.tm_hour) * 3600 - lt.tm_min * 60 + random.uniform(0, 3 * 3600)
+    return ts
+
+
+def _views_plan_post(state, ids, post_ts, labels, config):
+    """Pick who sees this post and when. Returns how many accounts were planned."""
+    lo, hi = config.get("views_share") or VIEWS_SHARE
+    spread = float(config.get("views_spread_hours", VIEWS_SPREAD_HOURS)) * 3600
+    age = max(0.0, time.time() - post_ts)
+    share = random.uniform(float(lo), float(hi))
+    if age > 0.5 * spread:            # old post found at startup: just a thin tail
+        share *= 0.4
+    window = max(1800.0, spread - age)
+    weights = {l: _account_activity(l) for l in labels}
+    mean_w = (sum(weights.values()) / len(weights)) if weights else 1.0
+    n = 0
+    for l in labels:
+        if random.random() < min(1.0, share * weights[l] / mean_w):
+            state["plan"].append([_views_due_ts(window, config), l, list(ids), 0])
+            n += 1
+    return n
+
+
+async def probe_recent_posts(config, channel, sessions, limit=20):
+    """Recent posts as [(ids, post_ts)] — albums grouped into one post. Uses the
+    first session that works (callers shuffle, so it isn't always the same)."""
+    api_id, api_hash = int(config["api_id"]), str(config["api_hash"])
+    for sp in sessions:
+        if shutdown_event.is_set():
+            break
+        label = sp.stem
+        if not await acquire_account(label, timeout=5):
+            continue
+        client = TelegramClient(str(sp.with_suffix("")), api_id, api_hash)
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                mark_dead_session(label)
+                continue
+            msgs = await client.get_messages(channel, limit=limit)
+            groups = {}
+            for m in msgs:
+                if getattr(m, "action", None) is not None:   # service message
+                    continue
+                key = m.grouped_id or m.id
+                g = groups.setdefault(key, [[], m.date.timestamp()])
+                g[0].append(m.id)
+                g[1] = min(g[1], m.date.timestamp())
+            return [(sorted(ids), ts) for ids, ts in groups.values()]
+        except Exception as e:
+            if is_ban_error(e):
+                mark_dead_session(label)
+            continue
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            release_account(label)
+    return None
+
+
+async def _views_one(config, channel, item, state):
+    """One account opens the channel and views its planned post (sometimes also
+    an older post it hadn't seen), lingers a bit, then marks it read."""
+    _, label, ids, tries = item
+    sp = next((d / f"{label}.session" for d in (SESSIONS_DIR, NEW_SESSIONS_DIR)
+               if (d / f"{label}.session").exists()), None)
+    if sp is None or label in load_dead_sessions() or label in load_excluded_sessions():
+        return
+
+    def retry_later(delay):
+        if tries < 3:
+            state["plan"].append([time.time() + delay, label, ids, tries + 1])
+
+    if not await acquire_account(label, timeout=30):
+        retry_later(random.uniform(300, 1500))
+        return
+    client = TelegramClient(str(sp.with_suffix("")), int(config["api_id"]),
+                            str(config["api_hash"]))
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            mark_dead_session(label)
+            return
+        entity = await client.get_entity(channel)
+        view = set(ids)
+        catchup = float(config.get("views_catchup", VIEWS_CATCHUP))
+        older = [r[0] for r in state["recent"] if r[0] != ids]
+        if older and random.random() < catchup:
+            for extra in random.sample(older, min(len(older), random.randint(1, 3))):
+                view.update(extra)
+        view = sorted(view)
+        await client(functions.messages.GetMessagesViewsRequest(
+            peer=entity, id=view, increment=True))
+        await asyncio.sleep(random.uniform(3, 15))      # "reading" the post
+        await client(functions.channels.ReadHistoryRequest(
+            channel=entity, max_id=max(view)))
+        state["done"] = state.get("done", 0) + 1
+    except errors.FloodWaitError as e:
+        retry_later(e.seconds + random.uniform(60, 600))
+    except Exception as e:
+        if is_ban_error(e):
+            mark_dead_session(label)
+        else:
+            retry_later(random.uniform(600, 1800))
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        release_account(label)
+
+
+async def views_drip_task(config, channel=VIEWS_CHANNEL, exclude=()):
+    """Watch `channel`; plan + execute organic views for every new post.
+    Runs forever (combo background task / server mode)."""
+    exclude = set(exclude)
+    state = _views_load_plan(channel)
+    poll = VIEWS_POLL_MINUTES * 60
+    parallel = max(1, int(config.get("views_parallel", VIEWS_PARALLEL)))
+    lookback = VIEWS_LOOKBACK_HOURS * 3600
+    running = set()
+    next_poll = 0.0
+    next_report = time.time() + 3600
+    done_mark = state.get("done", 0)
+    logger.info(f"Просмотры: органика включена — {len(state['plan'])} просмотр(ов) "
+                f"в очереди, проверка новых постов каждые ~{VIEWS_POLL_MINUTES} мин")
+
+    def pool():
+        return [s for s in get_session_files() if s.stem not in exclude]
+
+    while not shutdown_event.is_set():
+        now = time.time()
+        if now >= next_poll:
+            sessions = pool()
+            random.shuffle(sessions)
+            posts = await probe_recent_posts(config, channel, sessions) if sessions else None
+            if posts:
+                state["recent"] = [[ids, ts] for ids, ts in posts if now - ts < lookback]
+                labels = [s.stem for s in sessions]
+                last = state["last_id"]
+                if last is None:
+                    # First ever start: give the fresh posts their (remaining) tail.
+                    spread = float(config.get("views_spread_hours", VIEWS_SPREAD_HOURS)) * 3600
+                    fresh = [(ids, ts) for ids, ts in posts if now - ts < spread]
+                    for ids, ts in fresh:
+                        _views_plan_post(state, ids, ts, labels, config)
+                    if fresh:
+                        logger.info(f"Просмотры: старт — запланировал хвост для "
+                                    f"{len(fresh)} недавних пост(ов), в очереди "
+                                    f"{len(state['plan'])}")
+                else:
+                    new = [(ids, ts) for ids, ts in posts if max(ids) > last]
+                    for ids, ts in sorted(new, key=lambda x: x[1]):
+                        n = _views_plan_post(state, ids, ts, labels, config)
+                        logger.info(f"Просмотры: новый пост — увидят {n}/{len(labels)} "
+                                    f"аккаунтов, растянуто на ~"
+                                    f"{config.get('views_spread_hours', VIEWS_SPREAD_HOURS)}ч")
+                state["last_id"] = max(max(ids) for ids, _ in posts)
+                _views_save_plan(state)
+            next_poll = time.time() + poll * random.uniform(0.7, 1.3)
+
+        # Launch everything that's due, a few accounts at a time.
+        state["plan"].sort(key=lambda x: x[0])
+        launched = False
+        while (state["plan"] and state["plan"][0][0] <= time.time()
+               and len(running) < parallel and not shutdown_event.is_set()):
+            item = state["plan"].pop(0)
+            t = asyncio.create_task(_views_one(config, channel, item, state))
+            running.add(t)
+            t.add_done_callback(running.discard)
+            launched = True
+            await asyncio.sleep(random.uniform(1, 6))   # don't open them in lockstep
+        if launched:
+            _views_save_plan(state)
+
+        if time.time() >= next_report:
+            done = state.get("done", 0)
+            logger.info(f"Просмотры: за час {done - done_mark}, "
+                        f"в очереди ещё {len(state['plan'])}")
+            done_mark = done
+            next_report = time.time() + 3600
+            _views_save_plan(state)
+
+        due_full = state["plan"] and state["plan"][0][0] <= time.time()
+        wait = 2.0 if due_full else min(
+            30.0, max(1.0, min(next_poll, state["plan"][0][0] if state["plan"]
+                               else next_poll) - time.time()))
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=wait)
+        except asyncio.TimeoutError:
+            pass
+
+    for t in list(running):
+        t.cancel()
+    _views_save_plan(state)
 
 
 async def run_views(config):
@@ -3980,7 +4235,8 @@ async def run_combo(config):
     # top-tracking only, without touching sessions that are busy in another
     # project (sharing one .session across two running projects breaks the login).
     want_views = input(
-        f"Смотреть/читать посты канала @{VIEWS_CHANNEL} (всеми сессиями из sessions/)? "
+        f"Смотреть/читать посты канала @{VIEWS_CHANNEL} (органично: часть аккаунтов "
+        f"из sessions/, растянуто на ~{VIEWS_SPREAD_HOURS}ч)? "
         f"(y/n) [{'y' if want_reels else 'n'}]: "
     ).strip().lower()
     want_views = (want_views in ("y", "yes", "да")) or (want_views == "" and want_reels)
@@ -4042,35 +4298,10 @@ async def run_combo(config):
     reels_active = asyncio.Event()
 
     async def views_monitor():
-        # Continuously watch the channel; whenever a new post appears, view it
-        # across all accounts at full speed IMMEDIATELY — channel views are the
-        # top priority, so the Reels cycle yields to us (views_active) instead of
-        # the other way around. No rest-gating, no drizzle.
-        last_id = None
-        poll = VIEWS_POLL_MINUTES * 60
-        while not shutdown_event.is_set():
-            sessions = get_session_files()
-            if not sessions:
-                await _sleep_or_stop(poll)
-                continue
-            latest = await probe_latest_post_id(config, VIEWS_CHANNEL, sessions)
-            if latest is None:
-                await _sleep_or_stop(poll)
-                continue
-            if last_id is None or latest > last_id:
-                logger.info("Combo: новый пост — просмотры в приоритете (фарм ждёт)")
-                views_active.set()          # make the Reels cycle yield to us
-                try:
-                    # Full speed: no pause_event, no spread. use_lock=True so we
-                    # never double-open a session the Reels cycle is mid-account on.
-                    await views_cycle(config, sessions, quiet=True,
-                                      hours=VIEWS_LOOKBACK_HOURS,
-                                      use_progress=False, use_lock=True)
-                finally:
-                    views_active.clear()
-                last_id = latest
-                logger.info("Combo: просмотры нового поста завершены — фарм продолжается")
-            await _sleep_or_stop(poll)
+        # Organic drip: each new post is seen by a random share of accounts,
+        # spread over hours (see views_drip_task). Per-account locks keep it
+        # from ever double-opening a session the Reels cycle is on.
+        await views_drip_task(config, VIEWS_CHANNEL, exclude=held)
 
     async def _sleep_or_stop(seconds):
         try:
@@ -4159,8 +4390,85 @@ async def run_combo(config):
     logger.info("Combo stopped")
 
 
+def _find_session_exact(name):
+    """Session by exact label (digits) in sessions/, sniper_session/, new_sessions/."""
+    label = "".join(ch for ch in str(name) if ch.isdigit()) or str(name)
+    for d in (SESSIONS_DIR, SNIPER_SESSION_DIR, NEW_SESSIONS_DIR):
+        p = d / f"{label}.session"
+        if p.exists():
+            return p
+    return None
+
+
+async def run_server(config):
+    """Headless mode for a VPS (`python main.py server`): only the organic
+    channel views + the @trade «Обмен» watcher. No menus, no Reels/top/sniper.
+    Settings live in config.json → "server": {"views": true, "swap": true,
+    "swap_session": "<label>"}. Each part is restarted if it ever crashes."""
+    if sys.platform != "win32":
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, shutdown_event.set)
+
+    srv = config.get("server") or {}
+    want_views = bool(srv.get("views", True))
+    want_swap = bool(srv.get("swap", True))
+    swap_sp = None
+    if want_swap:
+        name = srv.get("swap_session") or config.get("swap_session")
+        swap_sp = _find_session_exact(name) if name else None
+        if not swap_sp:
+            logger.error('Сервер: «Обмен» выключен — укажи в config.json '
+                         '"server": {"swap_session": "<номер сессии>"}')
+            want_swap = False
+    if not (want_views or want_swap):
+        logger.error("Сервер: нечего запускать (views и swap выключены)")
+        return
+
+    async def supervise(name, factory):
+        while not shutdown_event.is_set():
+            delay = 30
+            try:
+                await factory()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Сервер: {name} упал: {e!r} — перезапуск через 30с")
+            else:
+                if shutdown_event.is_set():
+                    break
+                delay = 300   # e.g. session not authorized — don't hammer
+                logger.warning(f"Сервер: {name} остановился — повтор через 5 мин")
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+
+    tasks = []
+    held = {swap_sp.stem} if swap_sp else set()
+    if want_swap:
+        tasks.append(asyncio.create_task(
+            supervise("обмен @trade", lambda: swap_watch_task(config, swap_sp))))
+    if want_views:
+        tasks.append(asyncio.create_task(
+            supervise("просмотры", lambda: views_drip_task(config, VIEWS_CHANNEL,
+                                                           exclude=held))))
+    parts = (["просмотры"] if want_views else []) + \
+            ([f"обмен @trade ({swap_sp.stem})"] if want_swap else [])
+    logger.info(f"Сервер запущен: {', '.join(parts)}. Пул просмотров: "
+                f"{len([s for s in get_session_files() if s.stem not in held])} сессий")
+    await shutdown_event.wait()
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    logger.info("Сервер остановлен")
+
+
 async def main():
     config = load_config()
+    if any(a.lower() == "server" for a in sys.argv[1:]):
+        await run_server(config)
+        return
     interactive = sys.stdin.isatty()
     cli_mode = next((a.lower() for a in sys.argv[1:] if a.lower() in ("farm", "spin")), None)
 

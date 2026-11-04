@@ -96,3 +96,7 @@ ton_rate_cache.json
 
 # SwapGift «Обмен» watcher: ids seen in the last poll
 swap_exchange_seen.json
+
+# Organic views drip schedule (per machine)
+views_plan.json
+views_plan.tmp

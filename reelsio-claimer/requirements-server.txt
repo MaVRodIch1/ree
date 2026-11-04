@@ -1,0 +1,6 @@
+# Minimal deps for `python main.py server` (views + @trade «Обмен» watcher).
+telethon
+aiohttp
+requests
+# optional: faster Telegram crypto (prebuilt wheels on Linux x86_64)
+cryptg
