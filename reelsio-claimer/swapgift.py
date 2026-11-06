@@ -114,6 +114,24 @@ def _pct(permille):
     return f"{permille / 10:g}%" if isinstance(permille, (int, float)) else "—"
 
 
+def _lock_note(it, tz_hours: float = 3.0) -> str:
+    """' · 🔒 до 08.11 14:30 (МСК)' — a locked gift can't be swapped until then."""
+    until = it.get("lockedUntil")
+    if until:
+        from datetime import datetime, timedelta, timezone
+        try:
+            dt = datetime.fromisoformat(str(until).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt <= datetime.now(timezone.utc):
+                return ""                     # lock already expired
+            loc = dt.astimezone(timezone(timedelta(hours=tz_hours)))
+            return f" · 🔒 до {loc:%d.%m %H:%M} (МСК)"
+        except Exception:
+            pass
+    return " · 🔒 заблокирован" if it.get("isLocked") else ""
+
+
 def format_new_items(items, ton_usd: float = 0.0, limit: int = 10, title: str = "") -> str:
     """HTML announcement for freshly-listed exchange gifts. `title` overrides the
     header (used for the startup test message)."""
@@ -128,7 +146,7 @@ def format_new_items(items, ton_usd: float = 0.0, limit: int = 10, title: str = 
         price = it.get("exchangePriceTon") or 0
         usd = it.get("exchangePriceUsdt") or (price * ton_usd if ton_usd else 0)
         usd_s = f" <i>(~${usd:,.0f})</i>".replace(",", " ") if usd else ""
-        lock = " · 🔒 заблокирован" if it.get("isLocked") else ""
+        lock = _lock_note(it)
         lines.append(
             f"\n🎁 {title}\n"
             f"💎 <b>{price:g} TON</b>{usd_s}{lock}\n"
@@ -137,5 +155,8 @@ def format_new_items(items, ton_usd: float = 0.0, limit: int = 10, title: str = 
             f"{_h.escape(str(it.get('symbolName') or '—'))} {_pct(it.get('symbolRarityPermille'))}</i>")
     if len(items) > limit:
         lines.append(f"\n…и ещё {len(items) - limit}")
+    if any(_lock_note(it) for it in items):
+        lines.append("\n<i>🔒 — подарок на блокировке до указанного времени "
+                     "(так его помечает сам @trade).</i>")
     lines.append("\n👉 Обмен в @trade")
     return "\n".join(lines)

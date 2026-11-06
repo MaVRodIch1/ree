@@ -3957,16 +3957,25 @@ async def get_swap_init_data(client, bot_username: str) -> str:
     return init_data
 
 
+SWAP_SEEN_TTL = 48 * 3600   # a gift seen within this window is never re-announced
+
+
 def _load_swap_snapshot():
+    """{gift_id: last_seen_ts}. A gift that briefly leaves the «Обмен» list (taken
+    into a pending swap, then returned) and comes back isn't announced twice."""
     try:
-        return set(json.loads(SWAP_SNAPSHOT_FILE.read_text(encoding="utf-8")))
+        raw = json.loads(SWAP_SNAPSHOT_FILE.read_text(encoding="utf-8"))
     except Exception:
         return None
+    now = time.time()
+    if isinstance(raw, list):                 # old format: plain id list
+        return {str(i): now for i in raw}
+    return {str(k): float(v) for k, v in raw.items() if now - float(v) < SWAP_SEEN_TTL}
 
 
-def _save_swap_snapshot(ids):
+def _save_swap_snapshot(seen):
     try:
-        SWAP_SNAPSHOT_FILE.write_text(json.dumps(sorted(ids)), encoding="utf-8")
+        SWAP_SNAPSHOT_FILE.write_text(json.dumps(seen), encoding="utf-8")
     except Exception:
         pass
 
@@ -4098,6 +4107,7 @@ async def swap_watch_task(config, session_path):
             await client.send_message(target, text, parse_mode="html", link_preview=False)
 
     prev = _load_swap_snapshot()
+    last_save = 0.0
     sg = None
     fails = 0
     # One test message per start so you can see the chain works end-to-end
@@ -4142,16 +4152,25 @@ async def swap_watch_task(config, session_path):
                         if test_fails == 1 or test_fails % 60 == 0:
                             logger.warning(f"Обмен: тест не отправлен ({e}) — "
                                            f"повторяю (одобрена ли заявка в чат?)")
+                now_ts = time.time()
                 if prev is None:
                     logger.info(f"Обмен: сейчас {len(ids)} подарков — жду новые")
+                    prev = {}
                 else:
                     new = [it for it in items if str(it.get("id")) not in prev]
                     if new:
                         await send(swapgift.format_new_items(new))
                         logger.info(f"Обмен: новых подарков — {len(new)}, отправлено в чат")
-                if ids != prev:
-                    _save_swap_snapshot(ids)
-                prev = ids
+                changed = bool(ids - prev.keys())
+                for i in ids:
+                    prev[i] = now_ts
+                stale = [k for k, v in prev.items() if now_ts - v >= SWAP_SEEN_TTL]
+                for k in stale:
+                    del prev[k]
+                # Persist on change, plus refresh timestamps every ~10 min.
+                if changed or stale or now_ts - last_save >= 600:
+                    _save_swap_snapshot(prev)
+                    last_save = now_ts
                 fails = 0
                 pause = poll
             except swapgift.Unauthorized:
