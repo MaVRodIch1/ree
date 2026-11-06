@@ -39,7 +39,10 @@ GET_ASSETS = """query GetAssets($cursor: String, $limit: Int64!, $filter: Assets
       symbolRarityPermille
       isLocked
       lockedUntil
+      isPlatform
+      source
     }
+    total
     nextCursor
   }
 }"""
@@ -53,6 +56,7 @@ class SwapGift:
     def __init__(self, init_data: str):
         self.init_data = init_data
         self.token = None
+        self.last_total = None      # server-side count of the «Обмен» list
         self.s = requests.Session()
         self.s.headers.update({
             "user-agent": UA,
@@ -103,6 +107,8 @@ class SwapGift:
                 "filter": {"forExchange": True},
             })
             a = d.get("assets") or {}
+            if a.get("total") is not None:
+                self.last_total = a.get("total")
             items.extend(a.get("items") or [])
             cursor = a.get("nextCursor")
             if not cursor:
@@ -132,7 +138,8 @@ def _lock_note(it, tz_hours: float = 3.0) -> str:
     return " · 🔒 заблокирован" if it.get("isLocked") else ""
 
 
-def format_new_items(items, ton_usd: float = 0.0, limit: int = 10, title: str = "") -> str:
+def format_new_items(items, ton_usd: float = 0.0, limit: int = 10, title: str = "",
+                     total=None) -> str:
     """HTML announcement for freshly-listed exchange gifts. `title` overrides the
     header (used for the startup test message)."""
     import html as _h
@@ -158,5 +165,7 @@ def format_new_items(items, ton_usd: float = 0.0, limit: int = 10, title: str = 
     if any(_lock_note(it) for it in items):
         lines.append("\n<i>🔒 — подарок на блокировке до указанного времени "
                      "(так его помечает сам @trade).</i>")
+    if total is not None:
+        lines.append(f"\n📦 Всего в Обмене сейчас: <b>{total}</b>")
     lines.append("\n👉 Обмен в @trade")
     return "\n".join(lines)

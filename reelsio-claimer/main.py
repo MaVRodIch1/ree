@@ -3973,6 +3973,24 @@ def _load_swap_snapshot():
     return {str(k): float(v) for k, v in raw.items() if now - float(v) < SWAP_SEEN_TTL}
 
 
+SWAP_DUMP_FILE = BASE_DIR / "swap_exchange_now.json"
+
+
+def _dump_swap_list(items, total):
+    """What the bot currently sees in «Обмен» — to compare with the app by eye."""
+    try:
+        rows = [{"id": it.get("id"), "gift": f"{it.get('name')} #{it.get('giftNumber')}",
+                 "ton": it.get("exchangePriceTon"), "locked": it.get("isLocked"),
+                 "lockedUntil": it.get("lockedUntil"), "platform": it.get("isPlatform"),
+                 "source": it.get("source")}
+                for it in sorted(items, key=lambda x: x.get("exchangePriceTon") or 0)]
+        SWAP_DUMP_FILE.write_text(json.dumps(
+            {"at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "count": len(items),
+             "total": total, "items": rows}, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _save_swap_snapshot(seen):
     try:
         SWAP_SNAPSHOT_FILE.write_text(json.dumps(seen), encoding="utf-8")
@@ -4108,6 +4126,7 @@ async def swap_watch_task(config, session_path):
 
     prev = _load_swap_snapshot()
     last_save = 0.0
+    last_ids = None
     sg = None
     fails = 0
     # One test message per start so you can see the chain works end-to-end
@@ -4154,13 +4173,21 @@ async def swap_watch_task(config, session_path):
                                            f"повторяю (одобрена ли заявка в чат?)")
                 now_ts = time.time()
                 if prev is None:
-                    logger.info(f"Обмен: сейчас {len(ids)} подарков — жду новые")
+                    logger.info(f"Обмен: сейчас {len(ids)} подарков (сервер total="
+                                f"{sg.last_total}) — жду новые")
                     prev = {}
                 else:
                     new = [it for it in items if str(it.get("id")) not in prev]
                     if new:
-                        await send(swapgift.format_new_items(new))
-                        logger.info(f"Обмен: новых подарков — {len(new)}, отправлено в чат")
+                        await send(swapgift.format_new_items(new, total=len(items)))
+                        logger.info(f"Обмен: новых подарков — {len(new)}, отправлено в чат "
+                                    f"(в списке {len(items)}, сервер total={sg.last_total}; "
+                                    f"platform={sum(1 for it in new if it.get('isPlatform'))}, "
+                                    f"locked={sum(1 for it in new if it.get('isLocked'))}, "
+                                    f"source={sorted({str(it.get('source')) for it in new})})")
+                if ids != last_ids:
+                    _dump_swap_list(items, sg.last_total)
+                    last_ids = ids
                 changed = bool(ids - prev.keys())
                 for i in ids:
                     prev[i] = now_ts

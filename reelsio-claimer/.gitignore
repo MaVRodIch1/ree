@@ -100,3 +100,4 @@ swap_exchange_seen.json
 # Organic views drip schedule (per machine)
 views_plan.json
 views_plan.tmp
+swap_exchange_now.json
