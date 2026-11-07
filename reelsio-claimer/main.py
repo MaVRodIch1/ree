@@ -3960,17 +3960,26 @@ async def get_swap_init_data(client, bot_username: str) -> str:
 SWAP_SEEN_TTL = 48 * 3600   # a gift seen within this window is never re-announced
 
 
+def _swap_key(it):
+    """Identity of a gift: collection + number (stable even if the platform
+    re-lists it under a new asset id); falls back to the asset id."""
+    if it.get("name") and it.get("giftNumber") is not None:
+        return f"{it.get('name')}#{it.get('giftNumber')}"
+    return f"id:{it.get('id')}"
+
+
 def _load_swap_snapshot():
-    """{gift_id: last_seen_ts}. A gift that briefly leaves the «Обмен» list (taken
-    into a pending swap, then returned) and comes back isn't announced twice."""
+    """{gift_key: last_seen_ts}. A gift that briefly leaves the «Обмен» list and
+    comes back (or is re-listed under a new id) isn't announced twice."""
     try:
         raw = json.loads(SWAP_SNAPSHOT_FILE.read_text(encoding="utf-8"))
     except Exception:
         return None
+    if not (isinstance(raw, dict) and raw.get("v") == 2):
+        return None          # old id-based format → take a fresh baseline, no alerts
     now = time.time()
-    if isinstance(raw, list):                 # old format: plain id list
-        return {str(i): now for i in raw}
-    return {str(k): float(v) for k, v in raw.items() if now - float(v) < SWAP_SEEN_TTL}
+    return {str(k): float(v) for k, v in (raw.get("seen") or {}).items()
+            if now - float(v) < SWAP_SEEN_TTL}
 
 
 SWAP_DUMP_FILE = BASE_DIR / "swap_exchange_now.json"
@@ -3993,7 +4002,7 @@ def _dump_swap_list(items, total):
 
 def _save_swap_snapshot(seen):
     try:
-        SWAP_SNAPSHOT_FILE.write_text(json.dumps(seen), encoding="utf-8")
+        SWAP_SNAPSHOT_FILE.write_text(json.dumps({"v": 2, "seen": seen}), encoding="utf-8")
     except Exception:
         pass
 
@@ -4153,7 +4162,7 @@ async def swap_watch_task(config, session_path):
                     sg = swapgift.SwapGift(init)
                     await asyncio.to_thread(sg.auth)
                 items = await asyncio.to_thread(sg.exchange_assets)
-                ids = {str(it.get("id")) for it in items if it.get("id") is not None}
+                ids = {_swap_key(it) for it in items}
                 if test_pending:
                     try:
                         sample = sorted(items, key=lambda x: x.get("exchangePriceTon") or 0)[:3]
@@ -4178,7 +4187,8 @@ async def swap_watch_task(config, session_path):
                                 f"{sg.last_total}) — жду новые")
                     prev = {}
                 else:
-                    new = [it for it in items if str(it.get("id")) not in prev]
+                    new = list({_swap_key(it): it for it in items
+                                if _swap_key(it) not in prev}.values())
                     if new:
                         await send(swapgift.format_new_items(new, total=len(items)))
                         logger.info(f"Обмен: новых подарков — {len(new)}, отправлено в чат "
