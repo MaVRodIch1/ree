@@ -4127,6 +4127,7 @@ async def swap_watch_task(config, session_path):
     prev = _load_swap_snapshot()
     last_save = 0.0
     last_ids = None
+    first_seen = {}
     sg = None
     fails = 0
     # One test message per start so you can see the chain works end-to-end
@@ -4187,6 +4188,18 @@ async def swap_watch_task(config, session_path):
                                     f"source={sorted({str(it.get('source')) for it in new})})")
                 if ids != last_ids:
                     _dump_swap_list(items, sg.last_total)
+                    if last_ids is not None:
+                        # How long the "new" batches actually stay in the list.
+                        gone = last_ids - ids
+                        if gone:
+                            ages = [now_ts - first_seen[g] for g in gone if g in first_seen]
+                            age_s = f", пробыли ~{fmt_duration(sum(ages) / len(ages))}" if ages else ""
+                            logger.info(f"Обмен: из списка ушло {len(gone)} подарк(ов){age_s}; "
+                                        f"сейчас в списке {len(ids)}")
+                    for i in ids - (last_ids or set()):
+                        first_seen.setdefault(i, now_ts)
+                    for g in (last_ids or set()) - ids:
+                        first_seen.pop(g, None)
                     last_ids = ids
                 changed = bool(ids - prev.keys())
                 for i in ids:
